@@ -433,6 +433,8 @@ pub struct SwitchState {
     pub manifest_url: String,
     pub fallback_manifest_url: String,
     pub auto_check_updates: bool,
+    #[serde(default = "default_true")]
+    pub auto_launch: bool,
     #[serde(default)]
     pub codex_preserve_official_auth: bool,
     #[serde(default = "default_gateway_display_name")]
@@ -459,6 +461,7 @@ impl SwitchState {
             manifest_url: DEFAULT_MANIFEST_URL.to_string(),
             fallback_manifest_url: DEFAULT_FALLBACK_MANIFEST_URL.to_string(),
             auto_check_updates: true,
+            auto_launch: true,
             codex_preserve_official_auth: false,
             gateway_display_name: DEFAULT_GATEWAY_DISPLAY_NAME.to_string(),
             gateway_display_subtitle: DEFAULT_GATEWAY_DISPLAY_SUBTITLE.to_string(),
@@ -1088,5 +1091,31 @@ mod tests {
         let val_on_disk: serde_json::Value = serde_json::from_str(&raw_on_disk).unwrap();
         assert!(val_on_disk["mcp"]["edgeoneApiToken"].is_null());
         assert_eq!(val_on_disk["mcp"]["edgeoneProjectName"], "my-site");
+    }
+
+    #[test]
+    fn auto_launch_defaults_to_true_and_persists_false() {
+        let tmp = TempDir::new().unwrap();
+        let paths = AppPaths::for_test(tmp.path());
+
+        let default_state = read_switch_state(&paths);
+        assert!(default_state.auto_launch);
+
+        // Legacy state.json without autoLaunch should default to true
+        let legacy_json = r#"{
+            "baseUrl": "https://tako.shiroha.tech",
+            "manifestUrl": "https://example.com/manifest.json",
+            "fallbackManifestUrl": "https://example.com/fallback.json",
+            "autoCheckUpdates": true
+        }"#;
+        write_atomic(&paths.state_path(), legacy_json.as_bytes(), false).unwrap();
+        let migrated = read_switch_state(&paths);
+        assert!(migrated.auto_launch);
+
+        // Explicitly disabling persists false
+        let mut updated = migrated;
+        updated.auto_launch = false;
+        save_switch_state(&paths, &updated).unwrap();
+        assert!(!read_switch_state(&paths).auto_launch);
     }
 }

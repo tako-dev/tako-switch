@@ -512,6 +512,28 @@ export function GeneralSettingsPanel({
             <div className="py-3 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
+                  开机自动启动
+                </div>
+                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">
+                  登录系统后自动静默驻留托盘并保持网关就绪。
+                </div>
+              </div>
+              <ToggleSwitch
+                checked={dashboard?.state.autoLaunch ?? true}
+                disabled={savingSettings || !dashboard}
+                ariaLabel="开机自动启动"
+                onChange={(next) =>
+                  void onSavePatch(
+                    { autoLaunch: next },
+                    next ? "已开启开机自动启动" : "已关闭开机自动启动",
+                  )
+                }
+              />
+            </div>
+
+            <div className="py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
                   菜单栏显示实时余额
                 </div>
                 <div className="text-[11px] text-[var(--text-muted)] mt-0.5">

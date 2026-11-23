@@ -116,6 +116,7 @@ export interface SwitchState {
   manifestUrl: string;
   fallbackManifestUrl: string;
   autoCheckUpdates: boolean;
+  autoLaunch?: boolean;
   codexPreserveOfficialAuth?: boolean;
   gatewayDisplayName?: string;
   gatewayDisplaySubtitle?: string;
@@ -343,6 +344,7 @@ export interface SettingsPatch {
   manifestUrl?: string;
   fallbackManifestUrl?: string;
   autoCheckUpdates?: boolean;
+  autoLaunch?: boolean;
   codexPreserveOfficialAuth?: boolean;
   gatewayDisplayName?: string;
   gatewayDisplaySubtitle?: string;

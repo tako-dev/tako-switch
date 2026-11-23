@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod agy_proxy;
 pub mod auth;
+pub mod autostart;
 pub mod config;
 pub mod installer;
 pub mod manifest;
@@ -109,6 +110,7 @@ pub struct SettingsPatch {
     pub manifest_url: Option<String>,
     pub fallback_manifest_url: Option<String>,
     pub auto_check_updates: Option<bool>,
+    pub auto_launch: Option<bool>,
     pub codex_preserve_official_auth: Option<bool>,
     pub gateway_display_name: Option<String>,
     pub gateway_display_subtitle: Option<String>,
@@ -674,6 +676,10 @@ pub fn apply_settings_patch_for_paths(
     }
     if let Some(auto_chk) = input.auto_check_updates {
         state.auto_check_updates = auto_chk;
+    }
+    if let Some(auto_launch) = input.auto_launch {
+        autostart::sync_auto_launch(paths, auto_launch)?;
+        state.auto_launch = auto_launch;
     }
     if let Some(preserve) = input.codex_preserve_official_auth {
         state.codex_preserve_official_auth = preserve;
@@ -1811,7 +1817,16 @@ pub fn run() {
                 }
             });
 
+            #[cfg(not(debug_assertions))]
+            {
+                let initial_state = read_switch_state(&paths);
+                let _ = autostart::sync_auto_launch(&paths, initial_state.auto_launch);
+            }
+
             if let Some(win) = app.get_webview_window("main") {
+                if autostart::is_autostart_launch() {
+                    let _ = win.hide();
+                }
                 let win_clone = win.clone();
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
