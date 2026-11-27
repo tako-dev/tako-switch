@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   AlertTriangle,
   Brain,
+  Check,
   CheckCircle2,
   ChevronDown,
+  Copy,
   ExternalLink,
   Eye,
   EyeOff,
@@ -12,14 +15,20 @@ import {
   Globe2,
   Headphones,
   Image as ImageIcon,
+  Layers,
+  Loader2,
+  LogIn,
+  LogOut,
   RefreshCw,
   Sparkles,
+  UserCheck,
   X,
 } from "lucide-react";
 import {
   api,
+  type EdgeOneProgressEvent,
+  type EdgeOneStatus,
   type McpToolsConfig,
-  type NodeRuntimeInfo,
 } from "../lib/api";
 import { McpInlineTheater, type McpToolKey } from "./McpInlineTheater";
 import { StatusPill, ToggleSwitch } from "./UiPrimitives";
@@ -83,6 +92,8 @@ interface McpCenterPanelProps {
   onSaveEdgeOneConfig: (token: string, projectName: string) => Promise<void>;
   onSelectConsultModel: (model: string) => void;
   onRequestLogin: () => void;
+  onEdgeOneChanged?: () => void;
+  onNotify?: (msg: string) => void;
 }
 
 export function McpCenterPanel({
@@ -98,6 +109,8 @@ export function McpCenterPanel({
   onSaveEdgeOneConfig,
   onSelectConsultModel,
   onRequestLogin,
+  onEdgeOneChanged,
+  onNotify,
 }: McpCenterPanelProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<McpToolKey>("image");
@@ -117,38 +130,99 @@ export function McpCenterPanel({
   const [tokenDraft, setTokenDraft] = useState(mcp?.edgeoneApiToken ?? "");
   const [projectDraft, setProjectDraft] = useState(mcp?.edgeoneProjectName ?? "");
 
-  const [nodeInfo, setNodeInfo] = useState<NodeRuntimeInfo | null>(null);
-  const [checkingNode, setCheckingNode] = useState(false);
+  // Managed EdgeOne runtime & login state
+  const [edgeOneStatus, setEdgeOneStatus] = useState<EdgeOneStatus | null>(null);
+  const [loadingEdgeOne, setLoadingEdgeOne] = useState(false);
+  const [edgeOneSite, setEdgeOneSite] = useState<"china" | "global">("china");
+  const [loggingInEdgeOne, setLoggingInEdgeOne] = useState(false);
+  const [installingRuntime, setInstallingRuntime] = useState(false);
+  const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
+  const [loggingOutEdgeOne, setLoggingOutEdgeOne] = useState(false);
+  const [edgeOneProgress, setEdgeOneProgress] = useState<EdgeOneProgressEvent | null>(null);
+  const [edgeOneActionError, setEdgeOneActionError] = useState<string | null>(null);
+  const [copiedLoginUrl, setCopiedLoginUrl] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+  const autoHydratedRef = useRef(false);
 
   useEffect(() => {
     setTokenDraft(mcp?.edgeoneApiToken ?? "");
     setProjectDraft(mcp?.edgeoneProjectName ?? "");
   }, [mcp?.edgeoneApiToken, mcp?.edgeoneProjectName]);
 
-  const checkNode = useCallback(async () => {
-    setCheckingNode(true);
+  const refreshEdgeOne = useCallback(async (refreshAccount = true) => {
+    setLoadingEdgeOne(true);
     try {
-      const info = await api.checkNodeRuntime();
-      setNodeInfo(info);
+      const status = await api.getEdgeOneStatus(refreshAccount);
+      setEdgeOneStatus(status);
+      if (status.authenticated) {
+        setEdgeOneActionError(null);
+      }
+      // If local credentials already exist on disk (e.g. upgraded user) but the managed CLI
+      // hasn't been installed yet, auto-prepare it once so they are immediately ready without re-login.
+      if (!status.ready && status.hasLocalCredentials && !autoHydratedRef.current) {
+        autoHydratedRef.current = true;
+        setInstallingRuntime(true);
+        setEdgeOneProgress({
+          stage: "cli",
+          percent: 15,
+          message: "检测到已有腾讯云 EdgeOne 凭据，正在自动准备内置部署组件...",
+        });
+        try {
+          const readyStatus = await api.installEdgeOneRuntime(false);
+          setEdgeOneStatus(readyStatus);
+          setEdgeOneProgress(null);
+          if (readyStatus.authenticated) {
+            setEdgeOneActionError(null);
+          }
+        } catch (err) {
+          setEdgeOneProgress(null);
+          setEdgeOneActionError(String(err));
+        } finally {
+          setInstallingRuntime(false);
+        }
+      }
     } catch {
       // Gracefully ignore when backend command is unavailable in standalone frontend builds
-      setNodeInfo(null);
     } finally {
-      setCheckingNode(false);
+      setLoadingEdgeOne(false);
     }
   }, []);
 
   useEffect(() => {
-    if (mcp?.webPage) {
-      void checkNode();
-    }
-  }, [mcp?.webPage, checkNode]);
+    void refreshEdgeOne(true);
+  }, [refreshEdgeOne]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<EdgeOneProgressEvent>("edgeone-progress", (event) => {
+      if (disposed) return;
+      setEdgeOneProgress(event.payload);
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {
+        // Ignore outside Tauri runtime
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const activeTag = document.activeElement?.tagName?.toLowerCase();
-      if (activeTag === "input" || activeTag === "textarea") return;
+      if (activeTag === "input" || activeTag === "textarea" || activeTag === "select") return;
       if (authGuideOpen) {
         setAuthGuideOpen(false);
       } else if (drawerOpen) {
@@ -180,13 +254,138 @@ export function McpCenterPanel({
   const handleToggleWebPageSwitch = async (next: boolean) => {
     await onToggleWebPage(next);
     if (next) {
-      void checkNode();
+      void refreshEdgeOne(true);
     }
   };
 
-  const nodeMissingOrOld =
-    nodeInfo !== null && (!nodeInfo.available || !nodeInfo.meetsMinVersion);
-  const nodeReady = nodeInfo !== null && nodeInfo.available && nodeInfo.meetsMinVersion;
+  const handleLoginEdgeOne = async () => {
+    if (loggingInEdgeOne || installingRuntime) return;
+    setLoggingInEdgeOne(true);
+    setEdgeOneActionError(null);
+    setEdgeOneProgress({
+      stage: "prepare",
+      percent: 8,
+      message: "正在检查部署组件并准备浏览器授权...",
+    });
+    try {
+      const status = await api.loginEdgeOne(edgeOneSite);
+      setEdgeOneStatus(status);
+      setEdgeOneProgress(null);
+      onEdgeOneChanged?.();
+      onNotify?.("腾讯云 EdgeOne 登录成功，网站上线能力已自动就绪");
+    } catch (err) {
+      const msg = String(err);
+      setEdgeOneProgress(null);
+      if (msg.includes("已取消")) {
+        onNotify?.("已取消腾讯云 EdgeOne 登录");
+      } else {
+        setEdgeOneActionError(msg);
+      }
+      void refreshEdgeOne(false);
+    } finally {
+      setLoggingInEdgeOne(false);
+    }
+  };
+
+  const handleCancelEdgeOneLogin = async () => {
+    try {
+      await api.cancelEdgeOneLogin();
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleUpgradeEdgeOneRuntime = async () => {
+    if (installingRuntime || loggingInEdgeOne) return;
+    setInstallingRuntime(true);
+    setEdgeOneActionError(null);
+    setEdgeOneProgress({
+      stage: "cli",
+      percent: 25,
+      message: "正在检查并更新内置 EdgeOne 部署组件...",
+    });
+    try {
+      const status = await api.installEdgeOneRuntime(true);
+      setEdgeOneStatus(status);
+      setEdgeOneProgress(null);
+      onNotify?.(
+        status.cliVersion
+          ? `EdgeOne 部署组件已更新至 v${status.cliVersion}`
+          : "EdgeOne 部署组件已就绪",
+      );
+    } catch (err) {
+      setEdgeOneProgress(null);
+      setEdgeOneActionError(String(err));
+    } finally {
+      setInstallingRuntime(false);
+    }
+  };
+
+  const handleSwitchWorkspace = async (workspaceId: string) => {
+    if (!workspaceId || switchingWorkspace) return;
+    setSwitchingWorkspace(true);
+    setEdgeOneActionError(null);
+    try {
+      const status = await api.switchEdgeOneWorkspace(workspaceId);
+      setEdgeOneStatus(status);
+      onNotify?.(`已切换工作空间：${status.workspaceName ?? workspaceId}`);
+    } catch (err) {
+      setEdgeOneActionError(String(err));
+    } finally {
+      setSwitchingWorkspace(false);
+    }
+  };
+
+  const handleLogoutEdgeOne = async () => {
+    if (loggingOutEdgeOne) return;
+    setLoggingOutEdgeOne(true);
+    setEdgeOneActionError(null);
+    try {
+      const status = await api.logoutEdgeOne();
+      setEdgeOneStatus(status);
+      onNotify?.("已退出腾讯云 EdgeOne 登录");
+    } catch (err) {
+      setEdgeOneActionError(String(err));
+    } finally {
+      setLoggingOutEdgeOne(false);
+    }
+  };
+
+  const handleSaveAdvancedConfig = async () => {
+    await onSaveEdgeOneConfig(tokenDraft.trim(), projectDraft.trim());
+    void refreshEdgeOne(true);
+  };
+
+  const handleCopyLoginUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLoginUrl(true);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => setCopiedLoginUrl(false), 1800);
+    } catch {
+      // Fallback: ignore if clipboard is unavailable
+    }
+  };
+
+  const edgeOneBusy = loggingInEdgeOne || installingRuntime;
+  const edgeOneAuthed = Boolean(edgeOneStatus?.authenticated);
+  const availableWorkspaces = (edgeOneStatus?.workspaces ?? []).filter((w) => w.available);
+  const displayError = edgeOneActionError || (!edgeOneAuthed ? edgeOneStatus?.error ?? null : null);
+
+  const webPageStatusPill = (() => {
+    if (edgeOneBusy) {
+      return <StatusPill tone="warn">准备中...</StatusPill>;
+    }
+    if (edgeOneAuthed && webPageEnabled) {
+      return <StatusPill tone="ok">已就绪</StatusPill>;
+    }
+    if (edgeOneAuthed && !webPageEnabled) {
+      return <StatusPill tone="neutral">已登录 · 未开启</StatusPill>;
+    }
+    return <StatusPill tone="warn">待登录</StatusPill>;
+  })();
 
   return (
     <div className="tako-page-sub flex flex-col">
@@ -224,6 +423,7 @@ export function McpCenterPanel({
       <div className="grid grid-cols-1 min-[640px]:grid-cols-2 tako-list-stack">
         {/* Featured Full-Width Card: Tako Web Page (Tencent Cloud EdgeOne) */}
         <article
+          data-mcp-tool="tako_deploy_website"
           className="min-[640px]:col-span-2 tako-card-surface border border-[var(--accent-border)] tako-panel-pad flex flex-col gap-3"
           style={{ background: "var(--webpage-grad)" }}
         >
@@ -238,13 +438,14 @@ export function McpCenterPanel({
                     网站上线 · Tako Web Page
                   </h3>
                   <span className="text-[10.5px] font-semibold px-2 py-0.5 rounded-full bg-[var(--accent-soft)] border border-[var(--accent-border)] text-[var(--accent)]">
-                    腾讯云 EdgeOne
+                    腾讯云 EdgeOne · 内置稳定版
                   </span>
+                  {webPageStatusPill}
                 </div>
               </div>
 
               <p className="text-[12px] text-[var(--text-secondary)] mt-2.5 leading-relaxed">
-                AI 完成网站后，浏览器确认一次授权，即可发布到腾讯云 EdgeOne 公网。
+                只需点击下方登录一次腾讯云，运行环境、部署组件、项目命名与公网发布全部由 Tako 自动托管，对话一句话即可上线网站。
               </p>
             </div>
 
@@ -254,7 +455,7 @@ export function McpCenterPanel({
                 onClick={() => setAuthGuideOpen(true)}
                 className="h-[32px] px-3 rounded-[9px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[12px] font-medium text-[var(--text-primary)] transition cursor-pointer"
               >
-                查看授权流程
+                使用说明
               </button>
               <ToggleSwitch
                 checked={webPageEnabled}
@@ -266,45 +467,263 @@ export function McpCenterPanel({
             </div>
           </div>
 
-          {/* Node.js >= 18 Runtime Check Hint */}
-          {webPageEnabled && nodeMissingOrOld && (
-            <div className="rounded-[10px] border border-[var(--warning-border)] bg-[var(--warning-soft)] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--warning)]">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span className="leading-snug">
-                  {nodeInfo.available
-                    ? `当前 Node.js 版本为 ${nodeInfo.version ?? "未知"}，网站上线需要 Node.js 18 及以上版本。`
-                    : "未检测到本机 Node.js 环境，使用网站上线需要安装 Node.js 18+。"}
+          {/* Live Progress Panel (Runtime download / CLI install / Browser OAuth) */}
+          {edgeOneBusy && edgeOneProgress && (
+            <div className="rounded-[10px] border border-[var(--accent-border)] bg-[var(--bg-card)]/90 px-3.5 py-3 flex flex-col gap-2.5">
+              <div className="flex items-center justify-between gap-2 text-[12px]">
+                <div className="flex items-center gap-2 min-w-0 text-[var(--text-primary)] font-medium">
+                  <Loader2 className="h-3.5 w-3.5 text-[var(--accent)] animate-spin shrink-0" />
+                  <span className="truncate">{edgeOneProgress.message}</span>
+                </div>
+                <span className="text-[11px] font-mono text-[var(--text-muted)] shrink-0 tabular-nums">
+                  {edgeOneProgress.percent}%
                 </span>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+
+              <div className="h-1.5 w-full rounded-full bg-[var(--bg-subtle)] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
+                  style={{ width: `${Math.max(5, Math.min(100, edgeOneProgress.percent))}%` }}
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  {edgeOneProgress.loginUrl && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void api.openUrl(edgeOneProgress.loginUrl!)}
+                        className="h-7 px-2.5 rounded-[7px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11.5px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <span>打开浏览器授权页</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyLoginUrl(edgeOneProgress.loginUrl!)}
+                        className="h-7 px-2.5 rounded-[7px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] text-[11.5px] font-medium inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedLoginUrl ? (
+                          <>
+                            <Check className="h-3 w-3 text-[var(--success)]" />
+                            <span>已复制</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3 w-3" />
+                            <span>复制链接</span>
+                          </>
+                        )}
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {loggingInEdgeOne && (
+                  <button
+                    type="button"
+                    onClick={() => void handleCancelEdgeOneLogin()}
+                    className="h-7 px-2.5 rounded-[7px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)] text-[11.5px] font-medium cursor-pointer"
+                  >
+                    取消登录
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Authenticated Account & Workspace Bar */}
+          {!edgeOneBusy && edgeOneAuthed && edgeOneStatus && (
+            <div className="rounded-[10px] border border-[var(--success-border)] bg-[var(--bg-card)]/85 px-3.5 py-2.5 flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 min-w-0 text-[12px]">
+                  <span className="inline-flex items-center gap-1.5 font-semibold text-[var(--success)]">
+                    <UserCheck className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {edgeOneStatus.accountName ||
+                        edgeOneStatus.accountId ||
+                        (edgeOneStatus.authMode === "api_token" ? "API Token 已认证" : "腾讯云已登录")}
+                    </span>
+                  </span>
+
+                  {availableWorkspaces.length > 1 ? (
+                    <label className="inline-flex items-center gap-1.5 text-[11.5px] text-[var(--text-secondary)]">
+                      <Layers className="h-3.5 w-3.5 text-[var(--text-muted)] shrink-0" />
+                      <span>工作空间</span>
+                      <select
+                        value={edgeOneStatus.workspaceId ?? ""}
+                        disabled={switchingWorkspace}
+                        onChange={(e) => void handleSwitchWorkspace(e.target.value)}
+                        className="h-6 pl-2 pr-6 rounded-[6px] border border-[var(--border)] bg-[var(--bg-subtle)] text-[11.5px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] cursor-pointer disabled:opacity-50"
+                      >
+                        {availableWorkspaces.map((ws) => (
+                          <option key={ws.id} value={ws.id}>
+                            {ws.name}
+                            {ws.plan ? ` (${ws.plan})` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    edgeOneStatus.workspaceName && (
+                      <span className="inline-flex items-center gap-1 text-[11.5px] text-[var(--text-secondary)]">
+                        <Layers className="h-3.5 w-3.5 text-[var(--text-muted)] shrink-0" />
+                        <span>{edgeOneStatus.workspaceName}</span>
+                        {edgeOneStatus.plan && (
+                          <span className="px-1.5 py-0.2 rounded bg-[var(--bg-subtle)] text-[10.5px] text-[var(--text-muted)] font-medium">
+                            {edgeOneStatus.plan}
+                          </span>
+                        )}
+                      </span>
+                    )
+                  )}
+
+                  {edgeOneStatus.authMode === "api_token" && (
+                    <span className="text-[10.5px] px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] font-medium">
+                      API Token 模式
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    disabled={loadingEdgeOne || switchingWorkspace}
+                    onClick={() => void refreshEdgeOne(true)}
+                    className="h-7 px-2 rounded-[7px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[11.5px] text-[var(--text-secondary)] inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`h-3 w-3 ${loadingEdgeOne ? "animate-spin" : ""}`}
+                    />
+                    <span>刷新</span>
+                  </button>
+                  {edgeOneStatus.authMode === "login" && (
+                    <button
+                      type="button"
+                      disabled={loggingOutEdgeOne}
+                      onClick={() => void handleLogoutEdgeOne()}
+                      className="h-7 px-2 rounded-[7px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[11.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      <LogOut className="h-3 w-3" />
+                      <span>{loggingOutEdgeOne ? "退出中..." : "退出"}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {!webPageEnabled && (
+                <div className="pt-1.5 border-t border-[var(--border)]/60 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--warning)]">
+                  <span>腾讯云账号已登录，开启右上角开关后 AI 即可直接发布网站。</span>
+                  <button
+                    type="button"
+                    disabled={savingMcp || !mcp}
+                    onClick={() => void handleToggleWebPageSwitch(true)}
+                    className="h-6 px-2.5 rounded-[6px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    立即开启
+                  </button>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
+                <span className="inline-flex items-center gap-1.5">
+                  <CheckCircle2 className="h-3 w-3 text-[var(--success)] shrink-0" />
+                  <span>
+                    部署组件 EdgeOne CLI v{edgeOneStatus.cliVersion ?? "已就绪"}
+                    {edgeOneStatus.nodeVersion
+                      ? ` · Node ${edgeOneStatus.nodeVersion}${edgeOneStatus.nodeManaged ? " (内置)" : ""}`
+                      : ""}
+                    {" · 已内置于 Tako MCP"}
+                  </span>
+                </span>
                 <button
                   type="button"
-                  onClick={() => void api.openUrl("https://nodejs.org/")}
-                  className="h-7 px-2.5 rounded-[7px] bg-[var(--bg-card)] border border-[var(--warning-border)] text-[var(--warning)] text-[11.5px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                  onClick={() => void handleUpgradeEdgeOneRuntime()}
+                  className="text-[11px] text-[var(--text-muted)] hover:text-[var(--accent)] hover:underline cursor-pointer"
                 >
-                  <span>下载 Node.js</span>
-                  <ExternalLink className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  disabled={checkingNode}
-                  onClick={() => void checkNode()}
-                  className="h-7 px-2 rounded-[7px] hover:bg-[var(--bg-card)]/60 text-[11px] inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                >
-                  <RefreshCw className={`h-3 w-3 ${checkingNode ? "animate-spin" : ""}`} />
-                  <span>重检</span>
+                  更新部署组件
                 </button>
               </div>
             </div>
           )}
 
-          {webPageEnabled && nodeReady && (
-            <div className="flex items-center gap-1.5 text-[11.5px] text-[var(--success)]">
-              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-              <span>
-                本机 Node.js {nodeInfo.version} 已就绪 · 已自动同步至 Tako 模式客户端
-              </span>
+          {/* Unauthenticated One-Click Login CTA */}
+          {!edgeOneBusy && !edgeOneAuthed && (
+            <div className="rounded-[10px] border border-[var(--border)] bg-[var(--bg-card)]/85 px-3.5 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-col gap-1 min-w-0 flex-1">
+                <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                  {loadingEdgeOne ? "正在检测腾讯云 EdgeOne 登录状态..." : "登录后即可一句话上线网站"}
+                </div>
+                <div className="text-[11.5px] text-[var(--text-muted)] leading-snug">
+                  {edgeOneStatus?.cliInstalled
+                    ? `内置部署组件 v${edgeOneStatus.cliVersion} 已就绪，点击右侧按钮在浏览器确认一次即可。`
+                    : "首次登录会自动从国内镜像准备好部署组件（无需手动装 Node.js 或命令行），随后打开浏览器确认一次即可。"}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <div
+                  className="h-[32px] p-0.5 rounded-[8px] border border-[var(--border)] bg-[var(--bg-subtle)] inline-flex items-center text-[11px]"
+                  role="group"
+                  aria-label="选择腾讯云站点"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setEdgeOneSite("china")}
+                    className={`h-full px-2 rounded-[6px] font-medium transition cursor-pointer ${
+                      edgeOneSite === "china"
+                        ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-xs"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    中国站
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEdgeOneSite("global")}
+                    className={`h-full px-2 rounded-[6px] font-medium transition cursor-pointer ${
+                      edgeOneSite === "global"
+                        ? "bg-[var(--bg-card)] text-[var(--text-primary)] shadow-xs"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    国际站
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="edgeone-login-btn"
+                  disabled={loadingEdgeOne}
+                  onClick={() => void handleLoginEdgeOne()}
+                  className="h-[32px] px-3.5 rounded-[9px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-semibold inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                >
+                  <LogIn className="h-3.5 w-3.5" />
+                  <span>一键登录腾讯云 EdgeOne</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Error Banner (if any) */}
+          {displayError && !edgeOneBusy && (
+            <div className="rounded-[10px] border border-[var(--warning-border)] bg-[var(--warning-soft)] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--warning)]">
+              <div className="flex items-start gap-2 min-w-0 flex-1">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span className="leading-snug break-words">{displayError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEdgeOneActionError(null);
+                  void refreshEdgeOne(true);
+                }}
+                className="h-7 px-2.5 rounded-[7px] bg-[var(--bg-card)] border border-[var(--warning-border)] text-[var(--warning)] text-[11.5px] font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>重试检测</span>
+              </button>
             </div>
           )}
 
@@ -315,7 +734,7 @@ export function McpCenterPanel({
               onClick={() => setTokenOpen((prev) => !prev)}
               className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[var(--accent)] hover:underline cursor-pointer"
             >
-              <span>高级：Token 与项目名（选填）</span>
+              <span>高级：自定义默认项目名 / API Token（选填）</span>
               <ChevronDown
                 className={`h-3.5 w-3.5 transition-transform ${tokenOpen ? "rotate-180" : ""}`}
               />
@@ -324,7 +743,7 @@ export function McpCenterPanel({
             {tokenOpen && (
               <div className="mt-3 flex flex-col gap-2.5">
                 <p className="text-[11px] text-[var(--text-muted)]">
-                  留空即可免密钥浏览器授权；仅在团队固定账号或需要指定发布项目名时选填。
+                  普通用户留空即可，使用上方一键浏览器登录最省心；仅在团队固定账号或需要固定发布项目名时选填。
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div className="flex flex-col gap-1">
@@ -336,7 +755,7 @@ export function McpCenterPanel({
                         type={showToken ? "text" : "password"}
                         value={tokenDraft}
                         onChange={(e) => setTokenDraft(e.target.value)}
-                        placeholder="留空即可免密钥浏览器授权"
+                        placeholder="留空即可，使用上方一键浏览器登录"
                         className="w-full h-[33px] pl-2.5 pr-8 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] text-[12px] font-mono text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
                       />
                       <button
@@ -356,13 +775,13 @@ export function McpCenterPanel({
 
                   <div className="flex flex-col gap-1">
                     <label className="text-[11px] font-medium text-[var(--text-secondary)]">
-                      EDGEONE_PAGES_PROJECT_NAME
+                      默认项目名（EDGEONE_PAGES_PROJECT_NAME）
                     </label>
                     <input
                       type="text"
                       value={projectDraft}
                       onChange={(e) => setProjectDraft(e.target.value)}
-                      placeholder="例如：portfolio-site（留空自动生成）"
+                      placeholder="例如：portfolio-site（留空自动智能命名）"
                       className="w-full h-[33px] px-2.5 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
                     />
                   </div>
@@ -372,9 +791,7 @@ export function McpCenterPanel({
                   <button
                     type="button"
                     disabled={!edgeOneDirty || savingMcp}
-                    onClick={() =>
-                      void onSaveEdgeOneConfig(tokenDraft.trim(), projectDraft.trim())
-                    }
+                    onClick={() => void handleSaveAdvancedConfig()}
                     className="h-7 px-3 rounded-[8px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11.5px] font-semibold cursor-pointer disabled:opacity-45"
                   >
                     {savingMcp ? "保存中..." : "保存配置"}
@@ -432,7 +849,7 @@ export function McpCenterPanel({
         })}
       </div>
 
-      {/* EdgeOne Authorization Flow Modal */}
+      {/* EdgeOne Usage Guide Modal */}
       {authGuideOpen && (
         <div
           className="fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4"
@@ -446,12 +863,12 @@ export function McpCenterPanel({
               <div className="flex items-center gap-2">
                 <Globe2 className="h-4 w-4 text-[var(--accent)]" />
                 <h2 className="text-[14px] font-semibold text-[var(--text-primary)]">
-                  网站上线 · 免密钥浏览器授权流程
+                  网站上线 · 两步即可发布公网
                 </h2>
               </div>
               <button
                 type="button"
-                aria-label="关闭授权流程说明"
+                aria-label="关闭使用说明"
                 onClick={() => setAuthGuideOpen(false)}
                 className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
               >
@@ -461,36 +878,33 @@ export function McpCenterPanel({
 
             <div className="px-5 py-4 flex flex-col gap-3 text-[12.5px] text-[var(--text-secondary)]">
               <div className="rounded-[10px] bg-[var(--bg-subtle)]/80 px-3.5 py-2.5 text-[12px] text-[var(--text-primary)]">
-                默认无需申请或粘贴任何 API Token，按以下三步即可把 AI 写的网页上线到公网：
+                无需手动安装 Node.js、命令行工具或申请 API Token，Tako 已把整套部署能力封装进内置 MCP：
               </div>
               <ol className="space-y-2.5 pl-4 list-decimal leading-relaxed">
                 <li>
-                  <strong className="text-[var(--text-primary)]">开启开关</strong>：在卡片右上角开启「网站上线」，自动同步至所有 Tako 模式桌面客户端。
+                  <strong className="text-[var(--text-primary)]">一键登录腾讯云</strong>：点击卡片里的「一键登录腾讯云 EdgeOne」，Tako 自动准备好本地组件并拉起浏览器，确认一次授权后会自动开启并同步至所有 Tako 客户端。
                 </li>
                 <li>
-                  <strong className="text-[var(--text-primary)]">浏览器确认一次授权</strong>：让 AI 发布网站时，系统会自动打开腾讯云 EdgeOne 授权页，点一次确认即可完成认证。
-                </li>
-                <li>
-                  <strong className="text-[var(--text-primary)]">获得公网地址</strong>：静态页面自动打包部署，几秒内返回可公开访问的 HTTPS 链接。
+                  <strong className="text-[var(--text-primary)]">对话一句直接上线</strong>：在 Codex、Claude、Antigravity 或 WorkBuddy 中写完网页后，直接告诉 AI「帮我把这个网站部署上线」，支持整个文件夹、单个 HTML 文件或 ZIP 包，几秒内返回可公开访问的 HTTPS 地址。
                 </li>
               </ol>
               <p className="text-[11px] text-[var(--text-muted)]">
-                提示：运行该能力需要本机已安装 Node.js 18 及以上版本；如需绑定固定项目或团队 Token，可在卡片下方「高级」折叠区选填。
+                提示：所有发布均通过本地托管组件直连腾讯云 EdgeOne，告别 npx 超时卡死；如需多空间切换或固定项目名，可直接在卡片内操作。
               </p>
             </div>
 
             <div className="px-5 py-3 border-t border-[var(--border)] flex items-center justify-end gap-2">
-              {!webPageEnabled && (
+              {!edgeOneAuthed && (
                 <button
                   type="button"
-                  disabled={savingMcp || !mcp}
+                  disabled={edgeOneBusy}
                   onClick={() => {
                     setAuthGuideOpen(false);
-                    void handleToggleWebPageSwitch(true);
+                    void handleLoginEdgeOne();
                   }}
                   className="h-8 px-3.5 rounded-[8px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-semibold cursor-pointer disabled:opacity-50"
                 >
-                  立即开启能力
+                  立即一键登录
                 </button>
               )}
               <button

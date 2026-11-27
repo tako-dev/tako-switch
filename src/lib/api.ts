@@ -67,6 +67,44 @@ export interface NodeRuntimeInfo {
   npxPath: string | null;
 }
 
+export interface EdgeOneWorkspace {
+  id: string;
+  name: string;
+  plan: string;
+  status: string;
+  available: boolean;
+  current: boolean;
+  cached: boolean;
+}
+
+export interface EdgeOneStatus {
+  nodeAvailable: boolean;
+  nodeVersion: string | null;
+  nodeManaged: boolean;
+  cliInstalled: boolean;
+  cliVersion: string | null;
+  cliPath: string | null;
+  ready: boolean;
+  hasLocalCredentials?: boolean;
+  authenticated: boolean;
+  authMode: "none" | "login" | "api_token" | string;
+  accountName: string | null;
+  accountId: string | null;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  plan: string | null;
+  workspaceStatus: string | null;
+  workspaces: EdgeOneWorkspace[];
+  error: string | null;
+}
+
+export interface EdgeOneProgressEvent {
+  stage: string;
+  percent: number;
+  message: string;
+  loginUrl?: string | null;
+}
+
 export type ModelFilterMode = "recommended" | "custom" | "all";
 
 export interface ClientModelFilter {
@@ -754,6 +792,16 @@ export const api = {
   runMcpLiveDemo: (input: LiveDemoRequest) =>
     invoke<LiveDemoResult>("run_mcp_live_demo", { input }),
   checkNodeRuntime: () => invoke<NodeRuntimeInfo>("check_node_runtime"),
+  getEdgeOneStatus: (refreshAccount = true) =>
+    invoke<EdgeOneStatus>("get_edgeone_status", { refreshAccount }),
+  installEdgeOneRuntime: (forceUpgrade = false) =>
+    invoke<EdgeOneStatus>("install_edgeone_runtime", { forceUpgrade }),
+  loginEdgeOne: (site: "china" | "global" = "china") =>
+    invoke<EdgeOneStatus>("login_edgeone", { site }),
+  cancelEdgeOneLogin: () => invoke<boolean>("cancel_edgeone_login"),
+  switchEdgeOneWorkspace: (workspace: string) =>
+    invoke<EdgeOneStatus>("switch_edgeone_workspace", { workspace }),
+  logoutEdgeOne: () => invoke<EdgeOneStatus>("logout_edgeone"),
   getExtensionsSummary: () => invoke<ExtensionsSummary>("get_extensions_summary"),
   getMcpHubSnapshot: () => invoke<McpHubSnapshot>("get_mcp_hub_snapshot"),
   upsertMcpEntry: (entry: McpEntry) => invoke<McpHubSnapshot>("upsert_mcp_entry", { entry }),

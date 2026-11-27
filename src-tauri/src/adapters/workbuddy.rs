@@ -1,8 +1,7 @@
 use crate::adapters::{
-    build_edgeone_mcp_json_entry, build_stdio_mcp_json_entry, has_edgeone_mcp_server,
-    has_tako_mcp_server, merge_edgeone_mcp_server, merge_tako_mcp_server,
-    read_json_object_or_empty, AppId, AppMode, DesktopAppAdapter, DiagnosticResult, InstallInfo,
-    EDGEONE_MCP_SERVER_KEY,
+    build_stdio_mcp_json_entry, has_edgeone_mcp_server, has_tako_mcp_server, merge_tako_mcp_server,
+    read_json_object_or_empty, remove_legacy_edgeone_mcp_server, AppId, AppMode, DesktopAppAdapter,
+    DiagnosticResult, InstallInfo, EDGEONE_MCP_SERVER_KEY,
 };
 use crate::agy_proxy::{
     ensure_gateway_service, is_proxy_healthy, load_workbuddy_model_catalog,
@@ -102,6 +101,20 @@ impl WorkBuddyAdapter {
 
     pub fn mcp_approvals_json_path(paths: &AppPaths) -> PathBuf {
         paths.workbuddy_dir.join("mcp-approvals.json")
+    }
+
+    pub fn needs_mcp_refresh(paths: &AppPaths) -> bool {
+        let mcp_path = Self::mcp_json_path(paths);
+        if has_edgeone_mcp_server(&mcp_path) {
+            return true;
+        }
+        let approvals_path = Self::mcp_approvals_json_path(paths);
+        if let Ok(map) = read_json_object_or_empty(&approvals_path) {
+            if map.keys().any(|k| k.ends_with(&format!("::{EDGEONE_MCP_SERVER_KEY}"))) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn settings_json_path(paths: &AppPaths) -> PathBuf {
@@ -1084,14 +1097,7 @@ fn build_fallback_spec_from_id(id: &str) -> WorkBuddyModelEntrySpec {
         "gemini-4-carbon" => "Gemini 4 Carbon".to_string(),
         _ => id.to_string(),
     };
-    let context_window = if lower.contains("gpt-6")
-        || lower.contains("gemini-")
-        || lower.contains("deepseek-v4")
-    {
-        Some(1_000_000)
-    } else {
-        Some(200_000)
-    };
+    let context_window = Some(crate::agy_proxy::model_context_window(id));
     let supports_images = lower.starts_with("claude-")
         || lower.starts_with("gpt-")
         || lower.starts_with("gemini-")
@@ -1336,18 +1342,15 @@ impl DesktopAppAdapter for WorkBuddyAdapter {
                 }
 
                 merge_tako_mcp_server(&mcp_path, paths, true)?;
-                merge_edgeone_mcp_server(&mcp_path, &state.mcp, state.mcp.web_page)?;
+                remove_legacy_edgeone_mcp_server(&mcp_path)?;
 
-                // Pre-approve injected MCP servers in `~/.workbuddy/mcp-approvals.json`
-                // so WorkBuddy trusts them immediately without manual confirmation prompts.
+                // Pre-approve injected Tako MCP server in `~/.workbuddy/mcp-approvals.json`
+                // so WorkBuddy trusts it immediately without manual confirmation prompts.
+                // Website deployment (`tako_deploy_website`) is built into `tako`, so revoke
+                // any deprecated standalone `tako-web-page` entry.
                 let tako_entry = build_stdio_mcp_json_entry(paths);
                 approve_workbuddy_mcp_server(paths, "tako", &tako_entry)?;
-                if state.mcp.web_page {
-                    let edgeone_entry = build_edgeone_mcp_json_entry(&state.mcp);
-                    approve_workbuddy_mcp_server(paths, EDGEONE_MCP_SERVER_KEY, &edgeone_entry)?;
-                } else {
-                    revoke_workbuddy_mcp_server(paths, EDGEONE_MCP_SERVER_KEY, false)?;
-                }
+                revoke_workbuddy_mcp_server(paths, EDGEONE_MCP_SERVER_KEY, false)?;
                 Ok(())
             }
             AppMode::Official => {
@@ -1381,8 +1384,7 @@ impl DesktopAppAdapter for WorkBuddyAdapter {
                 let mcp_absent = paths.backups_dir("workbuddy").join("mcp.json.absent");
                 if mcp_path.exists() {
                     merge_tako_mcp_server(&mcp_path, paths, false)?;
-                    let state = read_switch_state(paths);
-                    merge_edgeone_mcp_server(&mcp_path, &state.mcp, false)?;
+                    remove_legacy_edgeone_mcp_server(&mcp_path)?;
                     if mcp_absent.exists() {
                         let is_empty_servers = read_json_object_or_empty(&mcp_path)
                             .ok()
@@ -1469,20 +1471,15 @@ impl DesktopAppAdapter for WorkBuddyAdapter {
                         .to_string(),
                 );
             }
-            let switch_state = read_switch_state(paths);
-            if switch_state.mcp.web_page {
-                if !has_edgeone_mcp_server(&mcp_path) {
-                    notes.push(
-                        "网站上线 MCP (EdgeOne) 尚未同步到 WorkBuddy，重新切换 Tako 即可写入"
-                            .to_string(),
-                    );
-                } else if is_workbuddy_mcp_approved(
-                    paths,
-                    EDGEONE_MCP_SERVER_KEY,
-                    &build_edgeone_mcp_json_entry(&switch_state.mcp),
-                ) {
-                    notes.push("网站上线 MCP (EdgeOne) 已自动信任".to_string());
-                }
+            if has_edgeone_mcp_server(&mcp_path) {
+                notes.push(
+                    "提示: 检测到旧版 tako-web-page (npx) 配置，重新切换 Tako 可自动迁移至内置稳定版"
+                        .to_string(),
+                );
+            } else if read_switch_state(paths).mcp.web_page && has_tako_mcp_server(&mcp_path) {
+                notes.push(
+                    "网站上线 (EdgeOne): 已集成至 Tako 内置 MCP (tako_deploy_website)".to_string(),
+                );
             }
         } else {
             notes.push("当前为官方原版模式；切至 Tako 后将自动把 Tako 模型与超级 MCP 写入 ~/.workbuddy".to_string());
@@ -2510,15 +2507,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_tako_approves_and_revokes_edgeone_mcp_while_preserving_user_approvals() {
+    fn apply_tako_migrates_legacy_edgeone_mcp_while_preserving_user_approvals() {
         let (_dir, paths) = test_paths();
         save_switch_auth(&paths, Some("sk-tako-test-key"), None, Some("test")).unwrap();
 
-        // Pre-existing user approval in mcp-approvals.json
+        // Pre-existing legacy tako-web-page in mcp.json and mcp-approvals.json + user approval
+        let mcp_path = WorkBuddyAdapter::mcp_json_path(&paths);
+        write_atomic(
+            &mcp_path,
+            br#"{"mcpServers":{"tako-web-page":{"command":"npx","args":["-y","@edgeone/makers-mcp@latest","--region","china"]},"user-custom-mcp":{"command":"foo"}}}"#,
+            false,
+        )
+        .unwrap();
         let approvals_path = WorkBuddyAdapter::mcp_approvals_json_path(&paths);
         write_atomic(
             &approvals_path,
-            br#"{"deadbeef::user-custom-mcp": 1700000000000}"#,
+            br#"{"deadbeef::user-custom-mcp": 1700000000000, "4089d830c06f4f4fb7ea0633fcd82f83b21154a6a1852ba0bea3b0b651dd7869::tako-web-page": 1700000000000}"#,
             false,
         )
         .unwrap();
@@ -2527,24 +2531,19 @@ mod tests {
         st.mcp.web_page = true;
         save_switch_state(&paths, &st).unwrap();
 
+        assert!(WorkBuddyAdapter::needs_mcp_refresh(&paths));
+
         let adapter = WorkBuddyAdapter;
         adapter.apply_mode(&paths, AppMode::Tako).unwrap();
 
+        assert!(!WorkBuddyAdapter::needs_mcp_refresh(&paths));
+        assert!(has_tako_mcp_server(&mcp_path));
+        assert!(!has_edgeone_mcp_server(&mcp_path));
         assert!(is_workbuddy_mcp_approved(
             &paths,
             "tako",
             &build_stdio_mcp_json_entry(&paths)
         ));
-        assert!(is_workbuddy_mcp_approved(
-            &paths,
-            EDGEONE_MCP_SERVER_KEY,
-            &build_edgeone_mcp_json_entry(&st.mcp)
-        ));
-
-        // Disable web_page and re-apply Tako -> revokes tako-web-page, keeps tako + user approval.
-        st.mcp.web_page = false;
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
 
         let map = read_json_object_or_empty(&approvals_path).unwrap();
         assert!(map.contains_key("deadbeef::user-custom-mcp"));

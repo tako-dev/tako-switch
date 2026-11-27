@@ -28,7 +28,7 @@ pub use i18n_packs::{
     merge_json_dict_with_overlay, refresh_remote_i18n_packs,
 };
 
-use crate::config::{write_atomic, AppPaths, McpToolsConfig};
+use crate::config::{write_atomic, AppPaths};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
@@ -180,6 +180,8 @@ pub const TAKO_MCP_TOOL_NAMES: &[&str] = &[
     "tako_web_search",
     "tako_consult",
     "tako_account_status",
+    "tako_deploy_website",
+    "tako_website_status",
 ];
 
 pub fn build_stdio_mcp_json_entry(paths: &AppPaths) -> Value {
@@ -246,71 +248,25 @@ pub fn has_tako_mcp_server(path: &Path) -> bool {
 }
 
 pub const EDGEONE_MCP_SERVER_KEY: &str = "tako-web-page";
-pub const EDGEONE_MCP_NPX_ARGS: &[&str] =
-    &["-y", "@edgeone/makers-mcp@latest", "--region", "china"];
 pub const EDGEONE_MCP_MIN_NODE_MAJOR: u32 = 18;
 
-pub fn build_edgeone_mcp_json_entry(mcp: &McpToolsConfig) -> Value {
-    let mut entry = Map::new();
-    entry.insert("command".to_string(), Value::String("npx".to_string()));
-    entry.insert(
-        "args".to_string(),
-        Value::Array(
-            EDGEONE_MCP_NPX_ARGS
-                .iter()
-                .map(|arg| Value::String((*arg).to_string()))
-                .collect(),
-        ),
-    );
-    let mut env = Map::new();
-    if let Some(token) = mcp.normalized_edgeone_api_token() {
-        env.insert(
-            "EDGEONE_PAGES_API_TOKEN".to_string(),
-            Value::String(token.to_string()),
-        );
-    }
-    if let Some(project) = mcp.normalized_edgeone_project_name() {
-        env.insert(
-            "EDGEONE_PAGES_PROJECT_NAME".to_string(),
-            Value::String(project.to_string()),
-        );
-    }
-    if !env.is_empty() {
-        entry.insert("env".to_string(), Value::Object(env));
-    }
-    Value::Object(entry)
-}
-
-pub fn merge_edgeone_mcp_server(
-    path: &Path,
-    mcp: &McpToolsConfig,
-    enable: bool,
-) -> Result<(), String> {
-    let mut root = if path.exists() {
-        read_json_object_or_empty(path)?
-    } else if !enable {
+/// Remove the deprecated standalone `tako-web-page` (`npx @edgeone/makers-mcp@latest`) MCP entry
+/// from a JSON MCP config file, preserving `tako` and all user-configured servers.
+/// Website deployment is now built directly into the native Rust `tako` MCP server
+/// (`tako_deploy_website` / `tako_website_status`).
+pub fn remove_legacy_edgeone_mcp_server(path: &Path) -> Result<(), String> {
+    if !path.exists() {
         return Ok(());
-    } else {
-        Map::new()
-    };
-
-    if enable {
-        let servers = root
-            .entry("mcpServers".to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !servers.is_object() {
-            *servers = Value::Object(Map::new());
-        }
-        if let Some(map) = servers.as_object_mut() {
-            map.insert(
-                EDGEONE_MCP_SERVER_KEY.to_string(),
-                build_edgeone_mcp_json_entry(mcp),
-            );
-        }
-    } else if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
-        servers.remove(EDGEONE_MCP_SERVER_KEY);
     }
-
+    let mut root = read_json_object_or_empty(path)?;
+    let removed = root
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .and_then(|servers| servers.remove(EDGEONE_MCP_SERVER_KEY))
+        .is_some();
+    if !removed {
+        return Ok(());
+    }
     let bytes = serde_json::to_vec_pretty(&Value::Object(root))
         .map_err(|e| format!("序列化 {} 失败: {e}", path.display()))?;
     write_atomic(path, &bytes, false)
@@ -397,6 +353,8 @@ fn node_search_dirs() -> Vec<PathBuf> {
         }
         if let Some(home) = dirs::home_dir() {
             for rel in [
+                ".local/opt/node/bin",
+                ".local/bin",
                 ".volta/bin",
                 ".fnm/current/bin",
                 ".asdf/shims",
@@ -813,75 +771,27 @@ mod tests {
     }
 
     #[test]
-    fn edgeone_mcp_entry_omits_env_when_blank_and_includes_non_empty_fields() {
-        let mut mcp = McpToolsConfig::default();
-        let entry_empty = build_edgeone_mcp_json_entry(&mcp);
-        assert_eq!(entry_empty["command"], "npx");
-        assert_eq!(
-            entry_empty["args"],
-            serde_json::json!(["-y", "@edgeone/makers-mcp@latest", "--region", "china"])
-        );
-        assert!(entry_empty.get("env").is_none());
-
-        mcp.edgeone_api_token = Some("   ".to_string());
-        mcp.edgeone_project_name = Some("\n\t ".to_string());
-        assert!(build_edgeone_mcp_json_entry(&mcp).get("env").is_none());
-
-        mcp.edgeone_api_token = Some("  eo_token_abc  ".to_string());
-        let entry_token_only = build_edgeone_mcp_json_entry(&mcp);
-        let env_obj = entry_token_only["env"].as_object().unwrap();
-        assert_eq!(env_obj.len(), 1);
-        assert_eq!(env_obj["EDGEONE_PAGES_API_TOKEN"], "eo_token_abc");
-        assert!(!env_obj.contains_key("EDGEONE_PAGES_PROJECT_NAME"));
-
-        mcp.edgeone_project_name = Some(" landing-prod ".to_string());
-        let entry_both = build_edgeone_mcp_json_entry(&mcp);
-        let env_both = entry_both["env"].as_object().unwrap();
-        assert_eq!(env_both.len(), 2);
-        assert_eq!(env_both["EDGEONE_PAGES_API_TOKEN"], "eo_token_abc");
-        assert_eq!(env_both["EDGEONE_PAGES_PROJECT_NAME"], "landing-prod");
-    }
-
-    #[test]
-    fn merge_edgeone_mcp_server_preserves_other_servers_and_skips_absent_on_disable() {
+    fn remove_legacy_edgeone_mcp_server_preserves_other_servers_and_skips_absent() {
         let tmp = TempDir::new().unwrap();
         let mcp_path = tmp.path().join("mcp_config.json");
-        let mcp = McpToolsConfig {
-            web_page: true,
-            edgeone_api_token: Some("eo_tok".to_string()),
-            ..McpToolsConfig::default()
-        };
 
-        // Disabling when absent must not create the file
-        merge_edgeone_mcp_server(&mcp_path, &mcp, false).unwrap();
+        // Removing when absent must not create the file
+        remove_legacy_edgeone_mcp_server(&mcp_path).unwrap();
         assert!(!mcp_path.exists());
         assert!(!has_edgeone_mcp_server(&mcp_path));
 
-        // Preserve existing servers (including tako and user servers)
+        // Removes only legacy tako-web-page while preserving tako and custom servers
         fs::write(
             &mcp_path,
-            r#"{"mcpServers":{"tako":{"command":"tako-switch","args":["mcp-server"]},"custom":{"command":"my-mcp"}}}"#,
+            r#"{"mcpServers":{"tako":{"command":"tako-switch","args":["mcp-server"]},"tako-web-page":{"command":"npx","args":["-y","@edgeone/makers-mcp@latest","--region","china"]},"custom":{"command":"my-mcp"}}}"#,
         )
         .unwrap();
-        merge_edgeone_mcp_server(&mcp_path, &mcp, true).unwrap();
         assert!(has_edgeone_mcp_server(&mcp_path));
-        assert!(has_tako_mcp_server(&mcp_path));
-        let enabled_root = read_json_object_or_empty(&mcp_path).unwrap();
-        let servers = enabled_root["mcpServers"].as_object().unwrap();
-        assert!(servers.contains_key("tako"));
-        assert!(servers.contains_key("custom"));
-        assert_eq!(servers[EDGEONE_MCP_SERVER_KEY]["command"], "npx");
-        assert_eq!(
-            servers[EDGEONE_MCP_SERVER_KEY]["env"]["EDGEONE_PAGES_API_TOKEN"],
-            "eo_tok"
-        );
-
-        // Disabling removes only tako-web-page
-        merge_edgeone_mcp_server(&mcp_path, &mcp, false).unwrap();
+        remove_legacy_edgeone_mcp_server(&mcp_path).unwrap();
         assert!(!has_edgeone_mcp_server(&mcp_path));
         assert!(has_tako_mcp_server(&mcp_path));
-        let disabled_root = read_json_object_or_empty(&mcp_path).unwrap();
-        let servers_after = disabled_root["mcpServers"].as_object().unwrap();
+        let cleaned_root = read_json_object_or_empty(&mcp_path).unwrap();
+        let servers_after = cleaned_root["mcpServers"].as_object().unwrap();
         assert!(servers_after.contains_key("tako"));
         assert!(servers_after.contains_key("custom"));
         assert!(!servers_after.contains_key(EDGEONE_MCP_SERVER_KEY));

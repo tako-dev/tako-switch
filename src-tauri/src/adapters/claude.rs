@@ -1,7 +1,7 @@
 use crate::adapters::{
-    build_edgeone_mcp_json_entry, has_edgeone_mcp_server, has_tako_mcp_server,
-    merge_edgeone_mcp_server, merge_tako_mcp_server, read_json_object_or_empty, AppId, AppMode,
-    DesktopAppAdapter, DiagnosticResult, InstallInfo, EDGEONE_MCP_SERVER_KEY,
+    has_edgeone_mcp_server, has_tako_mcp_server, merge_tako_mcp_server, read_json_object_or_empty,
+    remove_legacy_edgeone_mcp_server, AppId, AppMode, DesktopAppAdapter, DiagnosticResult,
+    InstallInfo, EDGEONE_MCP_SERVER_KEY,
 };
 use crate::agy_proxy::{
     ensure_gateway_service, is_proxy_healthy, stop_gateway_service_if_unused,
@@ -9,7 +9,6 @@ use crate::agy_proxy::{
 };
 use crate::config::{
     backup_file_once, read_backup, read_main_api_key, read_switch_state, write_atomic, AppPaths,
-    McpToolsConfig,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STD;
 use base64::Engine;
@@ -219,11 +218,7 @@ impl ClaudeAdapter {
             .unwrap_or(false)
     }
 
-    fn set_claude_code_mcp_permissions(
-        paths: &AppPaths,
-        enable: bool,
-        enable_edgeone: bool,
-    ) -> Result<(), String> {
+    fn set_claude_code_mcp_permissions(paths: &AppPaths, enable: bool) -> Result<(), String> {
         let path = Self::claude_code_settings_path(paths);
         if !enable && !path.exists() {
             return Ok(());
@@ -258,13 +253,8 @@ impl ClaudeAdapter {
                             arr.push(Value::String(rule.clone()));
                         }
                     }
-                    if enable_edgeone {
-                        if !arr.iter().any(|v| v.as_str() == Some(edgeone_rule.as_str())) {
-                            arr.push(Value::String(edgeone_rule));
-                        }
-                    } else {
-                        arr.retain(|v| v.as_str() != Some(edgeone_rule.as_str()));
-                    }
+                    // Always strip deprecated standalone tako-web-page wildcard; mcp__tako__* covers built-in tools.
+                    arr.retain(|v| v.as_str() != Some(edgeone_rule.as_str()));
                 }
             }
         } else {
@@ -300,6 +290,156 @@ impl ClaudeAdapter {
         let bytes = serde_json::to_vec_pretty(&Value::Object(root))
             .map_err(|e| format!("序列化 {} 失败: {e}", path.display()))?;
         write_atomic(&path, &bytes, false)
+    }
+
+    /// Sync per-model `modelSettings.<claude-tako-*>.autoCompactWindow` into `~/.claude/settings.json`
+    /// so Claude Desktop / Claude Code uses each non-1M Tako model's true context window (e.g. 262K
+    /// for SWE-2.1, 500K for Grok 4.7) instead of inheriting the 1M ceiling from `behavesAs: "claude-sonnet-5-5"`.
+    /// Preserves all user-owned `modelSettings` keys and per-model fields (`effortLevel`, `maxEffortLevel`, etc.),
+    /// stays safely below Claude Code's 64-key Zod limit on `modelSettings`, and cleans up cleanly on Official mode.
+    fn sync_claude_code_model_settings(paths: &AppPaths, enable: bool) -> Result<(), String> {
+        const CLAUDE_MODEL_SETTINGS_KEY_CAP: usize = 60;
+        const TAKO_WIRE_PREFIX: &str = "claude-tako-";
+
+        let path = Self::claude_code_settings_path(paths);
+        if !enable && !path.exists() {
+            return Ok(());
+        }
+        backup_file_once(paths, "claude", "claude_code_settings.json", &path)?;
+        let mut root = read_json_object_or_empty(&path)?;
+
+        if enable {
+            let state = read_switch_state(paths);
+            let windows = crate::agy_proxy::load_claude_model_context_windows(
+                paths,
+                &state.model_filters.claude,
+            );
+            let desired: std::collections::HashMap<String, u64> =
+                windows.iter().cloned().collect();
+
+            let ms_val = root
+                .entry("modelSettings".to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !ms_val.is_object() {
+                *ms_val = Value::Object(Map::new());
+            }
+            if let Some(ms_obj) = ms_val.as_object_mut() {
+                // Clear stale autoCompactWindow on `claude-tako-*` keys that are no longer < 1M
+                let stale_keys: Vec<String> = ms_obj
+                    .keys()
+                    .filter(|k| k.starts_with(TAKO_WIRE_PREFIX) && !desired.contains_key(*k))
+                    .cloned()
+                    .collect();
+                for key in stale_keys {
+                    let remove_whole = if let Some(entry_obj) =
+                        ms_obj.get_mut(&key).and_then(Value::as_object_mut)
+                    {
+                        entry_obj.remove("autoCompactWindow");
+                        entry_obj.is_empty()
+                    } else {
+                        false
+                    };
+                    if remove_whole {
+                        ms_obj.remove(&key);
+                    }
+                }
+
+                // Write/update active non-1M `claude-tako-*` entries in priority order
+                for (wire_id, ctx_window) in windows {
+                    if !ms_obj.contains_key(&wire_id)
+                        && ms_obj.len() >= CLAUDE_MODEL_SETTINGS_KEY_CAP
+                    {
+                        break;
+                    }
+                    let entry_val = ms_obj
+                        .entry(wire_id)
+                        .or_insert_with(|| Value::Object(Map::new()));
+                    if !entry_val.is_object() {
+                        *entry_val = Value::Object(Map::new());
+                    }
+                    if let Some(entry_obj) = entry_val.as_object_mut() {
+                        entry_obj.insert("autoCompactWindow".to_string(), Value::from(ctx_window));
+                    }
+                }
+            }
+        } else {
+            let backup_had_model_settings = read_backup(paths, "claude", "claude_code_settings.json")
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|v| v.as_object().cloned())
+                .is_some_and(|o| o.contains_key("modelSettings"));
+
+            if let Some(ms_obj) = root.get_mut("modelSettings").and_then(Value::as_object_mut) {
+                let tako_keys: Vec<String> = ms_obj
+                    .keys()
+                    .filter(|k| k.starts_with(TAKO_WIRE_PREFIX))
+                    .cloned()
+                    .collect();
+                for key in tako_keys {
+                    let remove_whole = if let Some(entry_obj) =
+                        ms_obj.get_mut(&key).and_then(Value::as_object_mut)
+                    {
+                        entry_obj.remove("autoCompactWindow");
+                        entry_obj.is_empty()
+                    } else {
+                        false
+                    };
+                    if remove_whole {
+                        ms_obj.remove(&key);
+                    }
+                }
+                if ms_obj.is_empty() && !backup_had_model_settings {
+                    root.remove("modelSettings");
+                }
+            }
+
+            let absent_marker = paths
+                .backups_dir("claude")
+                .join("claude_code_settings.json.absent");
+            if root.is_empty() && absent_marker.exists() {
+                if path.exists() {
+                    fs::remove_file(&path)
+                        .map_err(|e| format!("移除临时 {} 失败: {e}", path.display()))?;
+                }
+                return Ok(());
+            }
+        }
+
+        let bytes = serde_json::to_vec_pretty(&Value::Object(root))
+            .map_err(|e| format!("序列化 {} 失败: {e}", path.display()))?;
+        write_atomic(&path, &bytes, false)
+    }
+
+    fn are_claude_code_model_settings_synced(paths: &AppPaths) -> bool {
+        const CLAUDE_MODEL_SETTINGS_KEY_CAP: usize = 60;
+        let state = read_switch_state(paths);
+        let expected = crate::agy_proxy::load_claude_model_context_windows(
+            paths,
+            &state.model_filters.claude,
+        );
+        if expected.is_empty() {
+            return true;
+        }
+        let Ok(root) = read_json_object_or_empty(&Self::claude_code_settings_path(paths)) else {
+            return false;
+        };
+        let Some(ms_obj) = root.get("modelSettings").and_then(Value::as_object) else {
+            return false;
+        };
+        for (wire_id, ctx) in &expected {
+            if let Some(entry) = ms_obj.get(wire_id) {
+                if entry
+                    .as_object()
+                    .and_then(|o| o.get("autoCompactWindow"))
+                    .and_then(Value::as_u64)
+                    != Some(*ctx)
+                {
+                    return false;
+                }
+            } else if ms_obj.len() < CLAUDE_MODEL_SETTINGS_KEY_CAP {
+                return false;
+            }
+        }
+        true
     }
 
     fn tako_deployment_logo_data_uri() -> String {
@@ -419,10 +559,29 @@ impl ClaudeAdapter {
         let state = read_switch_state(paths);
         let expected_home = state.claude_workspace_mode.desktop_home_value();
         let up_to_date = Self::is_bypass_permissions_enabled(paths)
+            && Self::are_claude_code_model_settings_synced(paths)
+            && !Self::has_managed_edgeone_mcp(paths)
+            && !has_edgeone_mcp_server(&Self::mcp_1p_path(paths))
+            && !has_edgeone_mcp_server(&Self::mcp_3p_path(paths))
             && read_json_object_or_empty(&Self::profile_3p_path(paths))
                 .ok()
                 .is_some_and(|prof| {
-                    prof.get("desktopHome").and_then(Value::as_str) == Some(expected_home)
+                    let has_deploy_policy = prof
+                        .get("managedMcpServers")
+                        .and_then(Value::as_array)
+                        .and_then(|arr| {
+                            arr.iter().find(|e| {
+                                e.get("name").and_then(Value::as_str) == Some("tako")
+                            })
+                        })
+                        .and_then(|e| e.get("toolPolicy"))
+                        .and_then(Value::as_object)
+                        .is_some_and(|tp| {
+                            tp.contains_key("tako_deploy_website")
+                                && tp.contains_key("tako_website_status")
+                        });
+                    has_deploy_policy
+                        && prof.get("desktopHome").and_then(Value::as_str) == Some(expected_home)
                         && prof
                             .get("isClaudeCodeForDesktopEnabled")
                             .and_then(Value::as_bool)
@@ -640,10 +799,10 @@ impl DesktopAppAdapter for ClaudeAdapter {
                 Self::deactivate_3p(paths)?;
                 merge_tako_mcp_server(&mcp_1p, paths, false)?;
                 merge_tako_mcp_server(&mcp_3p, paths, false)?;
-                let empty_mcp = McpToolsConfig::default();
-                merge_edgeone_mcp_server(&mcp_1p, &empty_mcp, false)?;
-                merge_edgeone_mcp_server(&mcp_3p, &empty_mcp, false)?;
-                Self::set_claude_code_mcp_permissions(paths, false, false)?;
+                remove_legacy_edgeone_mcp_server(&mcp_1p)?;
+                remove_legacy_edgeone_mcp_server(&mcp_3p)?;
+                Self::set_claude_code_mcp_permissions(paths, false)?;
+                Self::sync_claude_code_model_settings(paths, false)?;
                 Self::sync_claude_chinese_locale(paths, false)?;
                 stop_gateway_service_if_unused(paths)
             }
@@ -679,9 +838,9 @@ impl DesktopAppAdapter for ClaudeAdapter {
                     (None, None) => None,
                 };
                 let instructions = if state.prefer_chinese_ui {
-                    "默认使用简体中文回复用户（除非用户明确要求其他语言）。需要生图/改图、生成视频、语音合成、联网搜索、多模型参谋或查询 Tako 账户余额/额度时，优先调用已挂载的 Tako MCP 工具（tako_generate_image / tako_generate_video / tako_generate_audio / tako_web_search / tako_consult / tako_account_status）。遵循 tako-skill 规范：保留用户指定模型；生图/视频超时或报错时切勿自动盲目重试（先查 tako_account_status，视频超时应传 resume_task_id 恢复）；联网搜索须引用实际返回的 results[].url，未返回来源时不要编造链接。"
+                    "默认使用简体中文回复用户（除非用户明确要求其他语言）。需要生图/改图、生成视频、语音合成、联网搜索、多模型参谋、网站上线（部署到公网）或查询 Tako 账户余额/额度时，优先调用已挂载的 Tako MCP 工具（tako_generate_image / tako_generate_video / tako_generate_audio / tako_web_search / tako_consult / tako_deploy_website / tako_website_status / tako_account_status）。遵循 tako-skill 规范：保留用户指定模型；生图/视频超时或报错时切勿自动盲目重试（先查 tako_account_status，视频超时应传 resume_task_id 恢复）；联网搜索须引用实际返回的 results[].url，未返回来源时不要编造链接。"
                 } else {
-                    "When generating/editing images, generating videos, synthesizing audio, searching the web, consulting a second frontier model, or checking current Tako balance/quota, prefer the mounted Tako MCP tools (tako_generate_image / tako_generate_video / tako_generate_audio / tako_web_search / tako_consult / tako_account_status). Follow tako-skill guardrails: preserve user-selected models; never blindly auto-retry paid image/video calls on timeout or failure (check tako_account_status first and pass resume_task_id for video recovery); cite actual results[].url in web searches without fabricating URLs."
+                    "When generating/editing images, generating videos, synthesizing audio, searching the web, consulting a second frontier model, deploying/publishing a website online, or checking current Tako balance/quota, prefer the mounted Tako MCP tools (tako_generate_image / tako_generate_video / tako_generate_audio / tako_web_search / tako_consult / tako_deploy_website / tako_website_status / tako_account_status). Follow tako-skill guardrails: preserve user-selected models; never blindly auto-retry paid image/video calls on timeout or failure (check tako_account_status first and pass resume_task_id for video recovery); cite actual results[].url in web searches without fabricating URLs."
                 };
 
                 let mut profile = Map::new();
@@ -766,42 +925,13 @@ impl DesktopAppAdapter for ClaudeAdapter {
                 // enforces `toolPolicy` for servers the deployment itself provides, so this
                 // is what makes the Tako tools usable without a per-tool approval prompt.
                 let mcp_entry = crate::adapters::build_stdio_mcp_json_entry(paths);
-                let mut managed_servers = vec![serde_json::json!({
+                let managed_servers = vec![serde_json::json!({
                     "name": "tako",
                     "transport": "stdio",
                     "command": mcp_entry.get("command").cloned().unwrap_or(Value::Null),
                     "args": mcp_entry.get("args").cloned().unwrap_or_else(|| serde_json::json!([])),
                     "toolPolicy": Value::Object(tool_policy)
                 })];
-                if state.mcp.web_page {
-                    let edgeone_entry = build_edgeone_mcp_json_entry(&state.mcp);
-                    let mut managed_edgeone = Map::new();
-                    managed_edgeone.insert(
-                        "name".to_string(),
-                        Value::String(EDGEONE_MCP_SERVER_KEY.to_string()),
-                    );
-                    managed_edgeone
-                        .insert("transport".to_string(), Value::String("stdio".to_string()));
-                    managed_edgeone.insert(
-                        "command".to_string(),
-                        edgeone_entry.get("command").cloned().unwrap_or(Value::Null),
-                    );
-                    managed_edgeone.insert(
-                        "args".to_string(),
-                        edgeone_entry
-                            .get("args")
-                            .cloned()
-                            .unwrap_or_else(|| serde_json::json!([])),
-                    );
-                    if let Some(env_val) = edgeone_entry.get("env") {
-                        managed_edgeone.insert("env".to_string(), env_val.clone());
-                    }
-                    managed_edgeone.insert(
-                        "toolPolicy".to_string(),
-                        serde_json::json!({ "*": "allow" }),
-                    );
-                    managed_servers.push(Value::Object(managed_edgeone));
-                }
                 profile.insert(
                     "managedMcpServers".to_string(),
                     Value::Array(managed_servers),
@@ -850,15 +980,15 @@ impl DesktopAppAdapter for ClaudeAdapter {
                 write_atomic(&meta_3p, &meta_bytes, false)?;
 
                 merge_tako_mcp_server(&mcp_1p, paths, false)?;
-                // The 3p slot gets tako and tako-web-page from the managed profile entry
-                // (`managedMcpServers`), not the user config, so keep the 3p user config clean
-                // to avoid starting a duplicate instance or triggering Claude Desktop's
-                // "Replaced by organization's server" error.
+                // The 3p slot gets `tako` (including built-in `tako_deploy_website`) from the
+                // managed profile entry (`managedMcpServers`), not user configs. Always clean up
+                // deprecated standalone `tako-web-page` (npx) entries from both 1p and 3p.
                 merge_tako_mcp_server(&mcp_3p, paths, false)?;
-                merge_edgeone_mcp_server(&mcp_1p, &state.mcp, state.mcp.web_page)?;
-                merge_edgeone_mcp_server(&mcp_3p, &state.mcp, false)?;
+                remove_legacy_edgeone_mcp_server(&mcp_1p)?;
+                remove_legacy_edgeone_mcp_server(&mcp_3p)?;
                 Self::enable_claude_3p_bypass_permissions(paths)?;
-                Self::set_claude_code_mcp_permissions(paths, true, state.mcp.web_page)?;
+                Self::set_claude_code_mcp_permissions(paths, true)?;
+                Self::sync_claude_code_model_settings(paths, true)?;
                 Self::sync_claude_chinese_locale(paths, state.prefer_chinese_ui)?;
                 Ok(())
             }
@@ -940,7 +1070,14 @@ impl DesktopAppAdapter for ClaudeAdapter {
                 || has_edgeone_mcp_server(&Self::mcp_3p_path(paths))
                 || has_edgeone_mcp_server(&Self::mcp_1p_path(paths))
             {
-                notes.push("网站上线 MCP (EdgeOne): 已启用 (tako-web-page)".to_string());
+                notes.push(
+                    "提示: 检测到旧版 tako-web-page (npx) 配置，重新切换 Tako 可自动迁移至内置稳定版"
+                        .to_string(),
+                );
+            } else if read_switch_state(paths).mcp.web_page && Self::has_managed_tako_mcp(paths) {
+                notes.push(
+                    "网站上线 (EdgeOne): 已集成至 Tako 内置 MCP (tako_deploy_website)".to_string(),
+                );
             }
             if read_switch_state(paths).prefer_chinese_ui || Self::is_chinese_configured(paths) {
                 notes.push("中文增强: 已启用 (locale=zh-Hans / Claude Code language=Simplified Chinese)".to_string());
@@ -1338,13 +1475,13 @@ mod tests {
     }
 
     #[test]
-    fn claude_edgeone_mcp_sync_enable_disable_and_official_preserves_existing() {
+    fn claude_edgeone_mcp_migrates_legacy_entry_and_allows_builtin_deploy_tools() {
         let tmp = TempDir::new().unwrap();
         let paths = AppPaths::for_test(tmp.path());
         fs::create_dir_all(&paths.claude_1p_dir).unwrap();
         fs::write(
             ClaudeAdapter::mcp_1p_path(&paths),
-            r#"{"mcpServers":{"existing":{"command":"foo"}}}"#,
+            r#"{"mcpServers":{"existing":{"command":"foo"},"tako-web-page":{"command":"npx","args":["-y","@edgeone/makers-mcp@latest","--region","china"]}}}"#,
         )
         .unwrap();
         save_switch_auth(&paths, Some("cr_claude_secret"), Some("2"), Some("oauth")).unwrap();
@@ -1354,7 +1491,7 @@ mod tests {
         save_switch_state(&paths, &st).unwrap();
 
         let adapter = ClaudeAdapter;
-        // Pre-seed a conflicting local entry in Claude-3p user config to verify it gets removed
+        // Pre-seed legacy entry in Claude-3p user config as well
         fs::create_dir_all(&paths.claude_3p_dir).unwrap();
         fs::write(
             ClaudeAdapter::mcp_3p_path(&paths),
@@ -1363,80 +1500,23 @@ mod tests {
         .unwrap();
         adapter.apply_mode(&paths, AppMode::Tako).unwrap();
 
-        assert!(has_edgeone_mcp_server(&ClaudeAdapter::mcp_1p_path(&paths)));
-        // 3p user config must NOT duplicate tako-web-page (delivered via managedMcpServers)
+        assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_1p_path(&paths)));
         assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_3p_path(&paths)));
-        assert!(ClaudeAdapter::has_managed_edgeone_mcp(&paths));
+        assert!(!ClaudeAdapter::has_managed_edgeone_mcp(&paths));
         let p1 = read_json_object_or_empty(&ClaudeAdapter::mcp_1p_path(&paths)).unwrap();
         let p1_servers = p1["mcpServers"].as_object().unwrap();
         assert!(p1_servers.contains_key("existing"));
-        assert!(p1_servers[EDGEONE_MCP_SERVER_KEY].get("env").is_none());
+        assert!(!p1_servers.contains_key(EDGEONE_MCP_SERVER_KEY));
 
         let prof = read_json_object_or_empty(&ClaudeAdapter::profile_3p_path(&paths)).unwrap();
         let managed = prof["managedMcpServers"].as_array().unwrap();
-        assert_eq!(managed.len(), 2);
-        let edgeone_managed = managed
-            .iter()
-            .find(|e| e.get("name").and_then(Value::as_str) == Some(EDGEONE_MCP_SERVER_KEY))
-            .unwrap();
-        assert_eq!(edgeone_managed["command"], "npx");
-        assert_eq!(edgeone_managed["toolPolicy"]["*"], "allow");
-        assert!(edgeone_managed.get("env").is_none());
+        assert_eq!(managed.len(), 1);
+        assert_eq!(managed[0]["name"], "tako");
+        assert_eq!(managed[0]["toolPolicy"]["tako_deploy_website"], "allow");
+        assert_eq!(managed[0]["toolPolicy"]["tako_website_status"], "allow");
+        assert!(!ClaudeAdapter::ensure_tako_profile_up_to_date(&paths).unwrap());
 
-        // Set token & project name and re-apply
-        st.mcp.edgeone_api_token = Some("eo_secret_1".to_string());
-        st.mcp.edgeone_project_name = Some("my-web".to_string());
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
-
-        let p1_tok = read_json_object_or_empty(&ClaudeAdapter::mcp_1p_path(&paths)).unwrap();
-        assert_eq!(
-            p1_tok["mcpServers"][EDGEONE_MCP_SERVER_KEY]["env"]["EDGEONE_PAGES_API_TOKEN"],
-            "eo_secret_1"
-        );
-        assert_eq!(
-            p1_tok["mcpServers"][EDGEONE_MCP_SERVER_KEY]["env"]["EDGEONE_PAGES_PROJECT_NAME"],
-            "my-web"
-        );
-        assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_3p_path(&paths)));
-        let prof_tok = read_json_object_or_empty(&ClaudeAdapter::profile_3p_path(&paths)).unwrap();
-        let edgeone_managed_tok = prof_tok["managedMcpServers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e.get("name").and_then(Value::as_str) == Some(EDGEONE_MCP_SERVER_KEY))
-            .unwrap();
-        assert_eq!(
-            edgeone_managed_tok["env"]["EDGEONE_PAGES_API_TOKEN"],
-            "eo_secret_1"
-        );
-        assert_eq!(
-            edgeone_managed_tok["env"]["EDGEONE_PAGES_PROJECT_NAME"],
-            "my-web"
-        );
-
-        // Disable web_page in Tako mode -> cleans up 1p/3p/managedMcpServers while keeping existing
-        st.mcp.web_page = false;
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
-
-        assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_1p_path(&paths)));
-        assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_3p_path(&paths)));
-        let p1_disabled = read_json_object_or_empty(&ClaudeAdapter::mcp_1p_path(&paths)).unwrap();
-        assert!(p1_disabled["mcpServers"]
-            .as_object()
-            .unwrap()
-            .contains_key("existing"));
-        let prof_disabled =
-            read_json_object_or_empty(&ClaudeAdapter::profile_3p_path(&paths)).unwrap();
-        assert_eq!(prof_disabled["managedMcpServers"].as_array().unwrap().len(), 1);
-
-        // Re-enable then switch to Official -> cleaned up completely
-        st.mcp.web_page = true;
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
-        assert!(has_edgeone_mcp_server(&ClaudeAdapter::mcp_1p_path(&paths)));
-
+        // Switching to Official preserves user's `existing` server and keeps legacy entries clean
         adapter.apply_mode(&paths, AppMode::Official).unwrap();
         assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_1p_path(&paths)));
         assert!(!has_edgeone_mcp_server(&ClaudeAdapter::mcp_3p_path(&paths)));
@@ -1572,5 +1652,100 @@ mod tests {
         adapter.apply_mode(&paths, AppMode::Official).unwrap();
         assert!(!ClaudeAdapter::ensure_tako_profile_up_to_date(&paths).unwrap());
         assert_eq!(adapter.read_mode(&paths), AppMode::Official);
+    }
+
+    #[test]
+    fn claude_syncs_per_model_context_windows_and_preserves_user_model_settings() {
+        let tmp = TempDir::new().unwrap();
+        let paths = AppPaths::for_test(tmp.path());
+        save_switch_auth(&paths, Some("cr_claude_secret"), Some("2"), Some("oauth")).unwrap();
+
+        let swe_wire = crate::agy_proxy::encode_claude_wire_model_id("swe-2-1");
+        let grok_wire = crate::agy_proxy::encode_claude_wire_model_id("grok-4.7");
+        let gpt62_wire = crate::agy_proxy::encode_claude_wire_model_id("gpt-6.2-sol");
+
+        // Pre-seed user settings with custom effortLevel on SWE-2.1 and a separate user model
+        let cc_settings = ClaudeAdapter::claude_code_settings_path(&paths);
+        fs::create_dir_all(cc_settings.parent().unwrap()).unwrap();
+        fs::write(
+            &cc_settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "modelSettings": {
+                    "claude-opus-5-5": { "effortLevel": "high" },
+                    swe_wire.clone(): { "effortLevel": "xhigh" }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let adapter = ClaudeAdapter;
+        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
+
+        let cc_tako = read_json_object_or_empty(&cc_settings).unwrap();
+        let ms = cc_tako
+            .get("modelSettings")
+            .and_then(Value::as_object)
+            .expect("modelSettings must be written in Tako mode");
+        assert!(ms.len() <= 60, "must stay safely below Claude Code's 64-key limit");
+
+        // SWE-2.1 gets exact 262K window AND preserves existing user effortLevel
+        let swe_entry = ms.get(&swe_wire).and_then(Value::as_object).unwrap();
+        assert_eq!(
+            swe_entry.get("autoCompactWindow").and_then(Value::as_u64),
+            Some(262_000)
+        );
+        assert_eq!(
+            swe_entry.get("effortLevel").and_then(Value::as_str),
+            Some("xhigh")
+        );
+
+        // Grok 4.7 gets exact 500K window
+        assert_eq!(
+            ms.get(&grok_wire)
+                .and_then(Value::as_object)
+                .and_then(|o| o.get("autoCompactWindow"))
+                .and_then(Value::as_u64),
+            Some(500_000)
+        );
+
+        // 1M models like GPT-6.2 Sol are NOT capped
+        assert!(
+            !ms.contains_key(&gpt62_wire),
+            "1M models should inherit the full 1M window without an autoCompactWindow cap"
+        );
+
+        // Unrelated user model settings stay untouched
+        assert_eq!(
+            ms.get("claude-opus-5-5")
+                .and_then(Value::as_object)
+                .and_then(|o| o.get("effortLevel"))
+                .and_then(Value::as_str),
+            Some("high")
+        );
+        assert!(ClaudeAdapter::are_claude_code_model_settings_synced(&paths));
+
+        // Official mode strips Tako's autoCompactWindow while keeping user effortLevel & custom entries
+        adapter.apply_mode(&paths, AppMode::Official).unwrap();
+        let cc_off = read_json_object_or_empty(&cc_settings).unwrap();
+        let ms_off = cc_off
+            .get("modelSettings")
+            .and_then(Value::as_object)
+            .expect("user modelSettings must survive Official mode");
+        assert_eq!(
+            ms_off
+                .get("claude-opus-5-5")
+                .and_then(Value::as_object)
+                .and_then(|o| o.get("effortLevel"))
+                .and_then(Value::as_str),
+            Some("high")
+        );
+        let swe_off = ms_off.get(&swe_wire).and_then(Value::as_object).unwrap();
+        assert!(swe_off.get("autoCompactWindow").is_none());
+        assert_eq!(
+            swe_off.get("effortLevel").and_then(Value::as_str),
+            Some("xhigh")
+        );
+        assert!(!ms_off.contains_key(&grok_wire));
     }
 }

@@ -22,19 +22,20 @@ use tako_switch_lib::adapters::antigravity_i18n::PATCH_GUARD_COMMENT;
 use tako_switch_lib::adapters::claude::ClaudeAdapter;
 use tako_switch_lib::adapters::codex::CodexAdapter;
 use tako_switch_lib::adapters::dsh_tako::DshTakoAdapter;
+use tako_switch_lib::adapters::workbuddy::WorkBuddyAdapter;
 use tako_switch_lib::adapters::{
-    build_edgeone_mcp_json_entry, detect_node_runtime, inspect_antigravity_ui_patch,
-    patch_antigravity_ui_for_paths, restore_antigravity_ui_for_paths, AppMode, DesktopAppAdapter,
-    UiPatchStatus, EDGEONE_MCP_SERVER_KEY,
+    detect_node_runtime, inspect_antigravity_ui_patch, patch_antigravity_ui_for_paths,
+    restore_antigravity_ui_for_paths, AppMode, DesktopAppAdapter, UiPatchStatus,
+    EDGEONE_MCP_SERVER_KEY,
 };
 use tako_switch_lib::config::{
     read_switch_state, save_switch_auth, save_switch_state, AppPaths, McpToolsConfig, SwitchState,
 };
+use tako_switch_lib::mcp_server::build_tools_catalog;
 use tempfile::TempDir;
 use toml_edit::DocumentMut;
 
 const ASAR_BLOCK_SIZE: usize = 4 * 1024 * 1024;
-const EXPECTED_EDGEONE_ARGS: &[&str] = &["-y", "@edgeone/makers-mcp@latest", "--region", "china"];
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -62,95 +63,11 @@ fn setup_logged_in_sandbox() -> (TempDir, AppPaths) {
     (tmp, paths)
 }
 
-fn assert_is_npx_command(cmd: &str, context: &str) {
-    let trimmed = cmd.trim();
-    assert!(!trimmed.is_empty(), "{context}: command must not be empty");
-    let is_npx = trimmed == "npx"
-        || Path::new(trimmed)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|stem| stem.eq_ignore_ascii_case("npx"));
-    assert!(
-        is_npx,
-        "{context}: command must be 'npx' or an absolute path to npx(.cmd), got '{trimmed}'"
-    );
-}
-
-fn assert_json_edgeone_entry(
-    entry: &Value,
-    expected_token: Option<&str>,
-    expected_project: Option<&str>,
-    context: &str,
-) {
-    let obj = entry
-        .as_object()
-        .unwrap_or_else(|| panic!("{context}: edgeone entry must be a JSON object, got {entry}"));
-
-    let cmd = obj
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("{context}: missing string 'command' field"));
-    assert_is_npx_command(cmd, context);
-
-    let args: Vec<&str> = obj
-        .get("args")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("{context}: missing array 'args' field"))
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .unwrap_or_else(|| panic!("{context}: args element must be string, got {v}"))
-        })
-        .collect();
-    assert_eq!(
-        args, EXPECTED_EDGEONE_ARGS,
-        "{context}: unexpected EdgeOne MCP args"
-    );
-
-    match (expected_token, expected_project) {
-        (None, None) => {
-            assert!(
-                !obj.contains_key("env"),
-                "{context}: must NOT contain 'env' key when both token and project are empty, got {entry}"
-            );
-        }
-        (tok, proj) => {
-            let env = obj
-                .get("env")
-                .and_then(Value::as_object)
-                .unwrap_or_else(|| panic!("{context}: expected 'env' object, got {entry}"));
-            match tok {
-                Some(expected) => {
-                    assert_eq!(
-                        env.get("EDGEONE_PAGES_API_TOKEN").and_then(Value::as_str),
-                        Some(expected),
-                        "{context}: mismatch on EDGEONE_PAGES_API_TOKEN"
-                    );
-                }
-                None => {
-                    assert!(
-                        !env.contains_key("EDGEONE_PAGES_API_TOKEN"),
-                        "{context}: must NOT write EDGEONE_PAGES_API_TOKEN when empty, got {env:?}"
-                    );
-                }
-            }
-            match proj {
-                Some(expected) => {
-                    assert_eq!(
-                        env.get("EDGEONE_PAGES_PROJECT_NAME").and_then(Value::as_str),
-                        Some(expected),
-                        "{context}: mismatch on EDGEONE_PAGES_PROJECT_NAME"
-                    );
-                }
-                None => {
-                    assert!(
-                        !env.contains_key("EDGEONE_PAGES_PROJECT_NAME"),
-                        "{context}: must NOT write EDGEONE_PAGES_PROJECT_NAME when empty, got {env:?}"
-                    );
-                }
-            }
-        }
-    }
+fn tool_names_for(mcp: &McpToolsConfig) -> Vec<String> {
+    build_tools_catalog(mcp)
+        .into_iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect()
 }
 
 fn contains_cjk(s: &str) -> bool {
@@ -479,85 +396,95 @@ fn tc_eo_01_legacy_state_json_backward_compat_and_roundtrip() {
 }
 
 #[test]
-fn tc_eo_02_build_edgeone_mcp_json_entry_without_credentials_and_whitespace_cleanup() {
+fn tc_eo_02_native_tako_mcp_exposes_website_tools_when_enabled() {
     assert_eq!(
         EDGEONE_MCP_SERVER_KEY, "tako-web-page",
-        "EDGEONE_MCP_SERVER_KEY contract mismatch"
+        "EDGEONE_MCP_SERVER_KEY reserved contract mismatch"
     );
 
-    // Case 1: None / None -> must omit `env` completely
-    let mcp_empty = McpToolsConfig {
-        web_page: true,
-        edgeone_api_token: None,
-        edgeone_project_name: None,
+    let mcp_off = McpToolsConfig {
+        web_page: false,
         ..Default::default()
     };
-    let entry_empty = build_edgeone_mcp_json_entry(&mcp_empty);
-    assert_json_edgeone_entry(&entry_empty, None, None, "no-credentials");
+    let names_off = tool_names_for(&mcp_off);
+    assert!(
+        !names_off.iter().any(|n| n == "tako_deploy_website"),
+        "tako_deploy_website must be hidden when web_page=false"
+    );
+    assert!(
+        !names_off.iter().any(|n| n == "tako_website_status"),
+        "tako_website_status must be hidden when web_page=false"
+    );
 
-    // Case 2: Empty / whitespace-only strings -> sanitized away, must omit `env`
+    let mcp_on = McpToolsConfig {
+        web_page: true,
+        ..Default::default()
+    };
+    let names_on = tool_names_for(&mcp_on);
+    assert!(
+        names_on.iter().any(|n| n == "tako_deploy_website"),
+        "tako_deploy_website must be exposed when web_page=true"
+    );
+    assert!(
+        names_on.iter().any(|n| n == "tako_website_status"),
+        "tako_website_status must be exposed when web_page=true"
+    );
+}
+
+#[test]
+fn tc_eo_03_edgeone_credential_normalization_trims_and_ignores_blank_values() {
     let mcp_blank = McpToolsConfig {
         web_page: true,
         edgeone_api_token: Some("   \t  ".to_string()),
         edgeone_project_name: Some("\n  \r\n".to_string()),
         ..Default::default()
     };
-    let entry_blank = build_edgeone_mcp_json_entry(&mcp_blank);
-    assert_json_edgeone_entry(&entry_blank, None, None, "whitespace-only-credentials");
-}
+    assert_eq!(mcp_blank.normalized_edgeone_api_token(), None);
+    assert_eq!(mcp_blank.normalized_edgeone_project_name(), None);
 
-#[test]
-fn tc_eo_03_build_edgeone_mcp_json_entry_with_token_and_project_name() {
-    // Only token (with surrounding whitespace), project blank
     let mcp_tok = McpToolsConfig {
         web_page: true,
         edgeone_api_token: Some("  eo_tok_abc123 \n".to_string()),
         edgeone_project_name: Some("   ".to_string()),
         ..Default::default()
     };
-    let entry_tok = build_edgeone_mcp_json_entry(&mcp_tok);
-    assert_json_edgeone_entry(&entry_tok, Some("eo_tok_abc123"), None, "token-only");
+    assert_eq!(
+        mcp_tok.normalized_edgeone_api_token(),
+        Some("eo_tok_abc123")
+    );
+    assert_eq!(mcp_tok.normalized_edgeone_project_name(), None);
 
-    // Only project (with surrounding whitespace), token None
-    let mcp_proj = McpToolsConfig {
-        web_page: true,
-        edgeone_api_token: None,
-        edgeone_project_name: Some("  demo-site-cn  ".to_string()),
-        ..Default::default()
-    };
-    let entry_proj = build_edgeone_mcp_json_entry(&mcp_proj);
-    assert_json_edgeone_entry(&entry_proj, None, Some("demo-site-cn"), "project-only");
-
-    // Both token and project set
     let mcp_both = McpToolsConfig {
         web_page: true,
         edgeone_api_token: Some("  eo_tok_xyz789 ".to_string()),
         edgeone_project_name: Some(" prod-web ".to_string()),
         ..Default::default()
     };
-    let entry_both = build_edgeone_mcp_json_entry(&mcp_both);
-    assert_json_edgeone_entry(
-        &entry_both,
-        Some("eo_tok_xyz789"),
-        Some("prod-web"),
-        "token-and-project",
+    assert_eq!(
+        mcp_both.normalized_edgeone_api_token(),
+        Some("eo_tok_xyz789")
+    );
+    assert_eq!(
+        mcp_both.normalized_edgeone_project_name(),
+        Some("prod-web")
     );
 }
 
 #[test]
-fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
+fn tc_eo_04_claude_1p_and_3p_edgeone_legacy_cleanup_and_native_tako_mcp() {
     let (_tmp, paths) = setup_logged_in_sandbox();
     let cfg_1p = paths.claude_1p_dir.join("claude_desktop_config.json");
     let cfg_3p = paths.claude_3p_dir.join("claude_desktop_config.json");
     fs::create_dir_all(&paths.claude_1p_dir).unwrap();
     fs::create_dir_all(&paths.claude_3p_dir).unwrap();
 
-    // Seed user-owned MCP servers in both 1p and 3p configs
+    // Seed user-owned MCP servers AND deprecated legacy `tako-web-page` npx entries
     fs::write(
         &cfg_1p,
         serde_json::to_string_pretty(&json!({
             "mcpServers": {
-                "user-1p-fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"] }
+                "user-1p-fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"] },
+                "tako-web-page": { "command": "npx", "args": ["-y", "@edgeone/makers-mcp@latest", "--region", "china"] }
             },
             "userPreference": "keep-1p"
         }))
@@ -577,7 +504,8 @@ fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
     )
     .unwrap();
 
-    // Enable web_page with credentials & apply AppMode::Tako
+    // Enable web_page & apply AppMode::Tako -> legacy `tako-web-page` must be removed everywhere,
+    // while built-in `tako` MCP (which hosts tako_deploy_website) and user servers remain intact.
     let mut state = SwitchState::default_for(&paths);
     state.mcp.web_page = true;
     state.mcp.edgeone_api_token = Some("eo-claude-tok".to_string());
@@ -588,7 +516,6 @@ fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
         .apply_mode(&paths, AppMode::Tako)
         .expect("Claude apply_mode(Tako) with web_page=true");
 
-    // 1p user config gets tako-web-page directly
     let doc_1p: Value = serde_json::from_str(&fs::read_to_string(&cfg_1p).unwrap()).unwrap();
     assert_eq!(
         doc_1p.get("userPreference").and_then(Value::as_str),
@@ -600,13 +527,15 @@ fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
         .and_then(Value::as_object)
         .expect("claude-1p: missing mcpServers object");
     assert!(servers_1p.contains_key("user-1p-fs"));
-    let edgeone_1p = servers_1p
-        .get(EDGEONE_MCP_SERVER_KEY)
-        .expect("claude-1p: missing tako-web-page in Tako+web_page=true");
-    assert_json_edgeone_entry(edgeone_1p, Some("eo-claude-tok"), Some("claude-site"), "claude-1p");
+    assert!(
+        !servers_1p.contains_key("tako"),
+        "claude-1p user config should not duplicate managed tako server"
+    );
+    assert!(
+        !servers_1p.contains_key(EDGEONE_MCP_SERVER_KEY),
+        "claude-1p must remove deprecated standalone tako-web-page entry"
+    );
 
-    // 3p user config must NOT duplicate tako-web-page (which is delivered via managedMcpServers),
-    // otherwise Claude Desktop flags "Replaced by organization's server".
     let doc_3p: Value = serde_json::from_str(&fs::read_to_string(&cfg_3p).unwrap()).unwrap();
     assert_eq!(
         doc_3p.get("userPreference").and_then(Value::as_str),
@@ -620,68 +549,34 @@ fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
     assert!(servers_3p.contains_key("user-3p-db"));
     assert!(
         !servers_3p.contains_key(EDGEONE_MCP_SERVER_KEY),
-        "claude-3p user config must remove duplicate tako-web-page because 3p profile delivers it via managedMcpServers"
+        "claude-3p user config must remove deprecated tako-web-page entry"
     );
 
-    // Verify 3p profile's managedMcpServers carries tako-web-page with credentials & allow policy
+    // 3p profile's managedMcpServers should deliver `tako`, NOT legacy `tako-web-page`
     let profile_3p_path = paths
         .claude_3p_dir
         .join("configLibrary")
         .join("7a405017-c100-4a80-9000-7a4050170001.json");
-    let profile_3p: Value = serde_json::from_str(&fs::read_to_string(&profile_3p_path).unwrap()).unwrap();
+    let profile_3p: Value =
+        serde_json::from_str(&fs::read_to_string(&profile_3p_path).unwrap()).unwrap();
     let managed = profile_3p
         .get("managedMcpServers")
         .and_then(Value::as_array)
         .expect("claude-3p profile missing managedMcpServers");
-    let managed_edgeone = managed
-        .iter()
-        .find(|e| e.get("name").and_then(Value::as_str) == Some(EDGEONE_MCP_SERVER_KEY))
-        .expect("claude-3p managedMcpServers must contain tako-web-page");
-    assert_json_edgeone_entry(
-        managed_edgeone,
-        Some("eo-claude-tok"),
-        Some("claude-site"),
-        "claude-3p-managed",
+    assert!(
+        managed
+            .iter()
+            .any(|e| e.get("name").and_then(Value::as_str) == Some("tako")),
+        "claude-3p managedMcpServers must contain native tako server"
     );
-    assert_eq!(
-        managed_edgeone
-            .get("toolPolicy")
-            .and_then(|v| v.get("*"))
-            .and_then(Value::as_str),
-        Some("allow")
+    assert!(
+        !managed
+            .iter()
+            .any(|e| e.get("name").and_then(Value::as_str) == Some(EDGEONE_MCP_SERVER_KEY)),
+        "claude-3p managedMcpServers must NOT emit deprecated standalone tako-web-page"
     );
 
-    // Disable web_page while staying in Tako -> must remove tako-web-page and preserve user servers
-    state.mcp.web_page = false;
-    save_switch_state(&paths, &state).unwrap();
-    ClaudeAdapter
-        .apply_mode(&paths, AppMode::Tako)
-        .expect("Claude apply_mode(Tako) with web_page=false");
-
-    for (label, path, preserved_key) in [
-        ("claude-1p-disabled", &cfg_1p, "user-1p-fs"),
-        ("claude-3p-disabled", &cfg_3p, "user-3p-db"),
-    ] {
-        let doc: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let servers = doc.get("mcpServers").and_then(Value::as_object).unwrap();
-        assert!(
-            !servers.contains_key(EDGEONE_MCP_SERVER_KEY),
-            "{label}: '{EDGEONE_MCP_SERVER_KEY}' must be removed when web_page=false"
-        );
-        assert!(
-            servers.contains_key(preserved_key),
-            "{label}: user server '{preserved_key}' must still exist"
-        );
-    }
-
-    // Re-enable web_page in Tako, then switch back to Official -> must remove tako-web-page cleanly
-    state.mcp.web_page = true;
-    state.mcp.edgeone_api_token = None;
-    state.mcp.edgeone_project_name = None;
-    save_switch_state(&paths, &state).unwrap();
-    ClaudeAdapter
-        .apply_mode(&paths, AppMode::Tako)
-        .expect("Claude re-apply Tako with web_page=true");
+    // Switch back to Official -> must remove tako & any legacy tako-web-page, preserve user servers
     ClaudeAdapter
         .apply_mode(&paths, AppMode::Official)
         .expect("Claude apply_mode(Official)");
@@ -697,6 +592,10 @@ fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
             "{label}: '{EDGEONE_MCP_SERVER_KEY}' must be removed in Official mode"
         );
         assert!(
+            !servers.contains_key("tako"),
+            "{label}: 'tako' must be removed in Official mode"
+        );
+        assert!(
             servers.contains_key(preserved_key),
             "{label}: user server '{preserved_key}' must be preserved in Official mode"
         );
@@ -704,7 +603,7 @@ fn tc_eo_04_claude_1p_and_3p_edgeone_mcp_sync_and_cleanup() {
 }
 
 #[test]
-fn tc_eo_05_codex_config_toml_edgeone_mcp_sync_and_cleanup() {
+fn tc_eo_05_codex_config_toml_legacy_edgeone_cleanup_and_native_tako_mcp() {
     let (_tmp, paths) = setup_logged_in_sandbox();
     fs::create_dir_all(&paths.codex_dir).unwrap();
     let cfg_path = paths.codex_dir.join("config.toml");
@@ -716,15 +615,17 @@ fn tc_eo_05_codex_config_toml_edgeone_mcp_sync_and_cleanup() {
 [mcp_servers.user_custom]
 command = "uvx"
 args = ["mcp-server-git"]
+
+[mcp_servers."tako-web-page"]
+command = "npx"
+args = ["-y", "@edgeone/makers-mcp@latest", "--region", "china"]
 "#,
     )
     .unwrap();
 
-    // 1) Tako + web_page=true (no credentials -> no env table)
+    // 1) Tako + web_page=true -> cleans up legacy tako-web-page, keeps tako and user_custom
     let mut state = SwitchState::default_for(&paths);
     state.mcp.web_page = true;
-    state.mcp.edgeone_api_token = None;
-    state.mcp.edgeone_project_name = None;
     save_switch_state(&paths, &state).unwrap();
 
     CodexAdapter
@@ -744,80 +645,12 @@ args = ["mcp-server-git"]
         servers.contains_key("tako"),
         "codex must keep built-in tako mcp server in Tako mode"
     );
-    let eo_tbl = servers
-        .get(EDGEONE_MCP_SERVER_KEY)
-        .and_then(|i| i.as_table_like())
-        .expect("codex must write [mcp_servers.\"tako-web-page\"] when web_page=true");
-    let cmd = eo_tbl
-        .get("command")
-        .and_then(|i| i.as_str())
-        .expect("codex tako-web-page missing command");
-    assert_is_npx_command(cmd, "codex-no-creds");
-    let args: Vec<&str> = eo_tbl
-        .get("args")
-        .and_then(|i| i.as_value())
-        .and_then(|v| v.as_array())
-        .expect("codex tako-web-page missing args array")
-        .iter()
-        .map(|v| v.as_str().expect("codex arg must be string"))
-        .collect();
-    assert_eq!(args, EXPECTED_EDGEONE_ARGS);
     assert!(
-        eo_tbl.get("env").is_none(),
-        "codex tako-web-page must NOT write env table when credentials are empty"
+        !servers.contains_key(EDGEONE_MCP_SERVER_KEY),
+        "codex must remove deprecated standalone tako-web-page"
     );
 
-    // 2) Add token + project name and re-sync -> env subtable populated
-    state.mcp.edgeone_api_token = Some("eo-codex-tok".to_string());
-    state.mcp.edgeone_project_name = Some("codex-web".to_string());
-    save_switch_state(&paths, &state).unwrap();
-    CodexAdapter
-        .apply_mode(&paths, AppMode::Tako)
-        .expect("Codex re-apply Tako with credentials");
-
-    let doc_creds: DocumentMut = fs::read_to_string(&cfg_path).unwrap().parse().unwrap();
-    let eo_env = doc_creds
-        .get("mcp_servers")
-        .and_then(|i| i.as_table_like())
-        .and_then(|s| s.get(EDGEONE_MCP_SERVER_KEY))
-        .and_then(|i| i.as_table_like())
-        .and_then(|t| t.get("env"))
-        .and_then(|i| i.as_table_like())
-        .expect("codex tako-web-page must write env table when credentials are configured");
-    assert_eq!(
-        eo_env.get("EDGEONE_PAGES_API_TOKEN").and_then(|i| i.as_str()),
-        Some("eo-codex-tok")
-    );
-    assert_eq!(
-        eo_env
-            .get("EDGEONE_PAGES_PROJECT_NAME")
-            .and_then(|i| i.as_str()),
-        Some("codex-web")
-    );
-
-    // 3) Disable web_page=false while staying in Tako -> remove only tako-web-page
-    state.mcp.web_page = false;
-    save_switch_state(&paths, &state).unwrap();
-    CodexAdapter
-        .apply_mode(&paths, AppMode::Tako)
-        .expect("Codex apply_mode(Tako) with web_page=false");
-
-    let doc_off: DocumentMut = fs::read_to_string(&cfg_path).unwrap().parse().unwrap();
-    let servers_off = doc_off
-        .get("mcp_servers")
-        .and_then(|i| i.as_table_like())
-        .expect("mcp_servers table should remain for tako and user_custom");
-    assert!(
-        !servers_off.contains_key(EDGEONE_MCP_SERVER_KEY),
-        "tako-web-page must be removed when web_page=false"
-    );
-    assert!(servers_off.contains_key("tako"));
-    assert!(servers_off.contains_key("user_custom"));
-
-    // 4) Re-enable web_page=true then switch back to Official -> remove tako-web-page & tako, keep user_custom
-    state.mcp.web_page = true;
-    save_switch_state(&paths, &state).unwrap();
-    CodexAdapter.apply_mode(&paths, AppMode::Tako).unwrap();
+    // 2) Switch back to Official -> removes tako, preserves user_custom
     CodexAdapter
         .apply_mode(&paths, AppMode::Official)
         .expect("Codex apply_mode(Official)");
@@ -833,71 +666,59 @@ args = ["mcp-server-git"]
 }
 
 #[test]
-fn tc_eo_06_antigravity_mcp_config_edgeone_sync_and_cleanup() {
+fn tc_eo_06_antigravity_and_workbuddy_legacy_edgeone_cleanup_and_native_tako_mcp() {
     let (_tmp, paths) = setup_logged_in_sandbox();
     fs::create_dir_all(&paths.agy_gemini_config_dir).unwrap();
-    let mcp_path = paths.agy_gemini_config_dir.join("mcp_config.json");
+    fs::create_dir_all(&paths.workbuddy_dir).unwrap();
+    let agy_mcp_path = paths.agy_gemini_config_dir.join("mcp_config.json");
+    let wb_mcp_path = paths.workbuddy_dir.join("mcp.json");
 
-    fs::write(
-        &mcp_path,
-        serde_json::to_string_pretty(&json!({
-            "mcpServers": {
-                "user-agy": { "command": "uvx", "args": ["demo-tool"] }
-            }
-        }))
-        .unwrap(),
-    )
+    let seed = serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "user-custom": { "command": "uvx", "args": ["demo-tool"] },
+            "tako-web-page": { "command": "npx", "args": ["-y", "@edgeone/makers-mcp@latest", "--region", "china"] }
+        }
+    }))
     .unwrap();
+    fs::write(&agy_mcp_path, &seed).unwrap();
+    fs::write(&wb_mcp_path, &seed).unwrap();
 
-    // 1) Tako + web_page=true with token only
     let mut state = SwitchState::default_for(&paths);
     state.mcp.web_page = true;
-    state.mcp.edgeone_api_token = Some("eo-agy-tok".to_string());
-    state.mcp.edgeone_project_name = Some("   ".to_string());
     save_switch_state(&paths, &state).unwrap();
 
     AntigravityAdapter
         .apply_mode(&paths, AppMode::Tako)
-        .expect("Antigravity apply_mode(Tako) with web_page=true");
-
-    let doc: Value = serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
-    let servers = doc.get("mcpServers").and_then(Value::as_object).unwrap();
-    assert!(servers.contains_key("user-agy"), "must preserve user-agy");
-    assert!(servers.contains_key("tako"), "must keep built-in tako");
-    let eo = servers
-        .get(EDGEONE_MCP_SERVER_KEY)
-        .expect("Antigravity mcp_config.json must contain tako-web-page");
-    assert_json_edgeone_entry(eo, Some("eo-agy-tok"), None, "antigravity-tako");
-
-    // 2) web_page=false while staying in Tako
-    state.mcp.web_page = false;
-    save_switch_state(&paths, &state).unwrap();
-    AntigravityAdapter
+        .expect("Antigravity apply_mode(Tako)");
+    WorkBuddyAdapter
         .apply_mode(&paths, AppMode::Tako)
-        .expect("Antigravity apply_mode(Tako) with web_page=false");
+        .expect("WorkBuddy apply_mode(Tako)");
 
-    let doc_off: Value = serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
-    let servers_off = doc_off.get("mcpServers").and_then(Value::as_object).unwrap();
-    assert!(!servers_off.contains_key(EDGEONE_MCP_SERVER_KEY));
-    assert!(servers_off.contains_key("tako"));
-    assert!(servers_off.contains_key("user-agy"));
+    for (label, path) in [("antigravity", &agy_mcp_path), ("workbuddy", &wb_mcp_path)] {
+        let doc: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let servers = doc.get("mcpServers").and_then(Value::as_object).unwrap();
+        assert!(servers.contains_key("user-custom"), "{label}: must preserve user-custom");
+        assert!(servers.contains_key("tako"), "{label}: must install native tako mcp");
+        assert!(
+            !servers.contains_key(EDGEONE_MCP_SERVER_KEY),
+            "{label}: must remove deprecated standalone tako-web-page"
+        );
+    }
 
-    // 3) Re-enable then switch to Official
-    state.mcp.web_page = true;
-    save_switch_state(&paths, &state).unwrap();
-    AntigravityAdapter.apply_mode(&paths, AppMode::Tako).unwrap();
     AntigravityAdapter
         .apply_mode(&paths, AppMode::Official)
         .expect("Antigravity apply_mode(Official)");
+    WorkBuddyAdapter
+        .apply_mode(&paths, AppMode::Official)
+        .expect("WorkBuddy apply_mode(Official)");
 
-    let doc_official: Value = serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
-    let servers_official = doc_official
-        .get("mcpServers")
-        .and_then(Value::as_object)
-        .unwrap();
-    assert!(!servers_official.contains_key(EDGEONE_MCP_SERVER_KEY));
-    assert!(!servers_official.contains_key("tako"));
-    assert!(servers_official.contains_key("user-agy"));
+    for (label, path) in [("antigravity", &agy_mcp_path), ("workbuddy", &wb_mcp_path)] {
+        let doc: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let servers = doc.get("mcpServers").and_then(Value::as_object).unwrap();
+        assert!(!servers.contains_key(EDGEONE_MCP_SERVER_KEY), "{label}");
+        assert!(!servers.contains_key("tako"), "{label}");
+        assert!(servers.contains_key("user-custom"), "{label}");
+    }
 }
 
 #[test]

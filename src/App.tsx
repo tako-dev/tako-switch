@@ -1636,6 +1636,8 @@ export default function App() {
             onSaveEdgeOneConfig={handleSaveEdgeOneConfig}
             onSelectConsultModel={(model) => void handleSelectConsultModel(model)}
             onRequestLogin={() => void handleOAuthLogin()}
+            onEdgeOneChanged={() => void loadDashboard(false)}
+            onNotify={showTransientNote}
           />
         )}
 

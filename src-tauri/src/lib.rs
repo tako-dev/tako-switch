@@ -3,6 +3,7 @@ pub mod agy_proxy;
 pub mod auth;
 pub mod client_monitor;
 pub mod config;
+pub mod edgeone;
 pub mod extensions;
 pub mod installer;
 pub mod manifest;
@@ -1203,6 +1204,127 @@ async fn check_node_runtime() -> Result<adapters::NodeRuntimeInfo, String> {
     Ok(tokio::task::spawn_blocking(adapters::detect_node_runtime)
         .await
         .unwrap_or_else(|_| adapters::NodeRuntimeInfo::unavailable()))
+}
+
+fn sync_legacy_edgeone_mcp_for_tako_clients(paths: &AppPaths) {
+    let _ = adapters::claude::ClaudeAdapter::ensure_tako_profile_up_to_date(paths);
+    if config::read_main_api_key(paths).is_some() {
+        let codex = adapters::codex::CodexAdapter;
+        if codex.read_mode(paths) == AppMode::Tako
+            && adapters::codex::CodexAdapter::needs_mcp_refresh(paths)
+        {
+            let _ = codex.apply_mode(paths, AppMode::Tako);
+        }
+        let wb = adapters::workbuddy::WorkBuddyAdapter;
+        if wb.read_mode(paths) == AppMode::Tako
+            && adapters::workbuddy::WorkBuddyAdapter::needs_mcp_refresh(paths)
+        {
+            let _ = wb.apply_mode(paths, AppMode::Tako);
+        }
+    }
+    if config::effective_agy_api_key(paths).is_some() {
+        let agy = adapters::antigravity::AntigravityAdapter;
+        if agy.read_mode(paths) == AppMode::Tako
+            && adapters::antigravity::AntigravityAdapter::needs_mcp_refresh(paths)
+        {
+            let _ = agy.apply_mode(paths, AppMode::Tako);
+        }
+    }
+}
+
+#[tauri::command]
+async fn get_edgeone_status(
+    refresh_account: Option<bool>,
+) -> Result<edgeone::EdgeOneStatus, String> {
+    let paths = AppPaths::detect()?;
+    Ok(edgeone::get_status(&paths, refresh_account.unwrap_or(true)).await)
+}
+
+#[tauri::command]
+async fn install_edgeone_runtime(
+    app: AppHandle,
+    force_upgrade: Option<bool>,
+    op_lock: tauri::State<'_, edgeone::EdgeOneOpLock>,
+) -> Result<edgeone::EdgeOneStatus, String> {
+    let _guard = op_lock.0.lock().await;
+    let paths = AppPaths::detect()?;
+    let handle = app.clone();
+    edgeone::ensure_edgeone_cli(&paths, force_upgrade.unwrap_or(false), &move |ev| {
+        let _ = handle.emit("edgeone-progress", &ev);
+    })
+    .await?;
+    Ok(edgeone::get_status(&paths, true).await)
+}
+
+#[tauri::command]
+async fn login_edgeone(
+    app: AppHandle,
+    site: Option<String>,
+    login_guard: tauri::State<'_, edgeone::EdgeOneLoginGuard>,
+    op_lock: tauri::State<'_, edgeone::EdgeOneOpLock>,
+) -> Result<edgeone::EdgeOneStatus, String> {
+    let _guard = op_lock.0.lock().await;
+    let paths = AppPaths::detect()?;
+    let handle = app.clone();
+    let started = std::time::Instant::now();
+    let site_str = site.unwrap_or_else(|| "china".to_string());
+    let res = edgeone::start_login(&paths, &site_str, login_guard.inner(), move |ev| {
+        let _ = handle.emit("edgeone-progress", &ev);
+    })
+    .await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(status) => {
+            sync_legacy_edgeone_mcp_for_tako_clients(&paths);
+            telemetry::track_event(
+                &paths,
+                "edgeone_login",
+                "tako-switch",
+                true,
+                elapsed_ms,
+                serde_json::json!({ "site": site_str }),
+            );
+            let _ = app.emit("state-changed", ());
+            Ok(status)
+        }
+        Err(err) => {
+            telemetry::track_event(
+                &paths,
+                "edgeone_login",
+                "tako-switch",
+                false,
+                elapsed_ms,
+                serde_json::json!({ "site": site_str }),
+            );
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_edgeone_login(
+    login_guard: tauri::State<'_, edgeone::EdgeOneLoginGuard>,
+) -> Result<bool, String> {
+    Ok(login_guard.cancel())
+}
+
+#[tauri::command]
+async fn switch_edgeone_workspace(
+    workspace: String,
+    op_lock: tauri::State<'_, edgeone::EdgeOneOpLock>,
+) -> Result<edgeone::EdgeOneStatus, String> {
+    let _guard = op_lock.0.lock().await;
+    let paths = AppPaths::detect()?;
+    edgeone::switch_workspace(&paths, &workspace).await
+}
+
+#[tauri::command]
+async fn logout_edgeone(
+    op_lock: tauri::State<'_, edgeone::EdgeOneOpLock>,
+) -> Result<edgeone::EdgeOneStatus, String> {
+    let _guard = op_lock.0.lock().await;
+    let paths = AppPaths::detect()?;
+    edgeone::logout(&paths).await
 }
 
 fn should_sync_standalone_locale(paths: &AppPaths, app_id: AppId, enable: bool) -> bool {
@@ -2805,6 +2927,8 @@ pub fn run() {
         .manage(CachedAccount(std::sync::Mutex::new(initial_cache)))
         .manage(PendingSelfUpdate(Mutex::new(None)))
         .manage(TrayUpdateNotice(std::sync::Mutex::new(None)))
+        .manage(edgeone::EdgeOneLoginGuard::new())
+        .manage(edgeone::EdgeOneOpLock::default())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -2913,7 +3037,7 @@ pub fn run() {
             if any_tako {
                 let _ = agy_proxy::ensure_gateway_service(&paths);
             }
-            let _ = adapters::claude::ClaudeAdapter::ensure_tako_profile_up_to_date(&paths);
+            sync_legacy_edgeone_mcp_for_tako_clients(&paths);
 
             // Refresh Claude 3p and WorkBuddy model catalog caches shortly after startup so
             // upgraded clients automatically pick up updated recommended models (e.g. swe-2-1)
@@ -3065,6 +3189,12 @@ pub fn run() {
             install_self_update,
             run_mcp_live_demo,
             check_node_runtime,
+            get_edgeone_status,
+            install_edgeone_runtime,
+            login_edgeone,
+            cancel_edgeone_login,
+            switch_edgeone_workspace,
+            logout_edgeone,
             get_extensions_summary,
             get_mcp_hub_snapshot,
             upsert_mcp_entry,
@@ -3153,6 +3283,13 @@ mod tests {
             .apply_mode(&paths, AppMode::Tako)
             .unwrap();
 
+        // Pre-seed legacy npx tako-web-page entries to verify automatic migration on settings save
+        std::fs::write(
+            paths.claude_1p_dir.join("claude_desktop_config.json"),
+            r#"{"mcpServers":{"tako-web-page":{"command":"npx","args":["-y","@edgeone/makers-mcp@latest","--region","china"]}}}"#,
+        )
+        .unwrap();
+
         let mut next_mcp = read_switch_state(&paths).mcp;
         next_mcp.web_page = true;
         next_mcp.edgeone_api_token = Some("   ".to_string());
@@ -3170,8 +3307,9 @@ mod tests {
         assert_eq!(saved.mcp.edgeone_api_token, None);
         assert_eq!(saved.mcp.edgeone_project_name.as_deref(), Some("demo-site"));
 
-        // Claude & Codex synced automatically (Claude 3p receives tako-web-page via managedMcpServers, not user config)
-        assert!(adapters::has_edgeone_mcp_server(
+        // Claude & Codex migrate away from legacy npx `tako-web-page` and approve built-in
+        // `tako_deploy_website` / `tako_website_status` inside the managed `tako` MCP server.
+        assert!(!adapters::has_edgeone_mcp_server(
             &paths.claude_1p_dir.join("claude_desktop_config.json")
         ));
         assert!(!adapters::has_edgeone_mcp_server(
@@ -3184,19 +3322,23 @@ mod tests {
                 .join("7a405017-c100-4a80-9000-7a4050170001.json"),
         )
         .unwrap();
-        assert!(claude_3p_profile.contains(adapters::EDGEONE_MCP_SERVER_KEY));
-        assert!(claude_3p_profile.contains("\"EDGEONE_PAGES_PROJECT_NAME\": \"demo-site\""));
+        assert!(!claude_3p_profile.contains(adapters::EDGEONE_MCP_SERVER_KEY));
+        assert!(claude_3p_profile.contains("tako_deploy_website"));
+        assert!(claude_3p_profile.contains("tako_website_status"));
         let codex_toml = std::fs::read_to_string(paths.codex_dir.join("config.toml")).unwrap();
-        assert!(codex_toml.contains(adapters::EDGEONE_MCP_SERVER_KEY));
-        assert!(codex_toml.contains("EDGEONE_PAGES_PROJECT_NAME = \"demo-site\""));
-        assert!(!codex_toml.contains("EDGEONE_PAGES_API_TOKEN"));
+        assert!(!codex_toml.contains(adapters::EDGEONE_MCP_SERVER_KEY));
+        assert!(codex_toml.contains("tako_deploy_website"));
+        assert!(codex_toml.contains("tako_website_status"));
 
         // Antigravity (Official) was NOT touched
         assert!(!adapters::has_edgeone_mcp_server(
             &paths.agy_gemini_config_dir.join("mcp_config.json")
         ));
+        assert!(!adapters::has_tako_mcp_server(
+            &paths.agy_gemini_config_dir.join("mcp_config.json")
+        ));
 
-        // Update token -> synced automatically
+        // Update token -> stored normalized in SwitchState only (never leaked into client config files)
         let mut with_token = saved.mcp.clone();
         with_token.edgeone_api_token = Some("  eo_live_tok  ".to_string());
         let saved_tok = apply_settings_patch_for_paths(
@@ -3212,12 +3354,12 @@ mod tests {
             Some("eo_live_tok")
         );
         let codex_toml_tok = std::fs::read_to_string(paths.codex_dir.join("config.toml")).unwrap();
-        assert!(codex_toml_tok.contains("EDGEONE_PAGES_API_TOKEN = \"eo_live_tok\""));
+        assert!(!codex_toml_tok.contains("eo_live_tok"));
 
-        // Disable web_page -> cleaned up automatically
+        // Disable web_page -> saved cleanly
         let mut disabled = saved_tok.mcp.clone();
         disabled.web_page = false;
-        apply_settings_patch_for_paths(
+        let saved_off = apply_settings_patch_for_paths(
             &paths,
             SettingsPatch {
                 mcp: Some(disabled),
@@ -3225,14 +3367,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!adapters::has_edgeone_mcp_server(
-            &paths.claude_1p_dir.join("claude_desktop_config.json")
-        ));
-        assert!(!adapters::has_edgeone_mcp_server(
-            &paths.claude_3p_dir.join("claude_desktop_config.json")
-        ));
-        let codex_toml_off = std::fs::read_to_string(paths.codex_dir.join("config.toml")).unwrap();
-        assert!(!codex_toml_off.contains(adapters::EDGEONE_MCP_SERVER_KEY));
+        assert!(!saved_off.mcp.web_page);
     }
 
     #[test]

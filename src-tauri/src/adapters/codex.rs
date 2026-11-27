@@ -1,6 +1,6 @@
 use crate::adapters::{
     read_json_object_or_empty, sync_managed_chinese_markdown, AppId, AppMode, DesktopAppAdapter,
-    DiagnosticResult, InstallInfo, EDGEONE_MCP_NPX_ARGS, EDGEONE_MCP_SERVER_KEY,
+    DiagnosticResult, InstallInfo, EDGEONE_MCP_SERVER_KEY,
 };
 use crate::agy_proxy::{
     ensure_gateway_service, is_proxy_healthy, stop_gateway_service_if_unused,
@@ -8,7 +8,6 @@ use crate::agy_proxy::{
 };
 use crate::config::{
     backup_file_once, read_backup, read_main_api_key, read_switch_state, write_atomic, AppPaths,
-    McpToolsConfig,
 };
 use serde_json::Value as JsonValue;
 use std::fs;
@@ -281,32 +280,8 @@ impl CodexAdapter {
             .unwrap_or(false)
     }
 
-    fn set_edgeone_mcp_server(doc: &mut DocumentMut, mcp: &McpToolsConfig, enable: bool) {
-        if enable {
-            if !doc.contains_table("mcp_servers") {
-                doc["mcp_servers"] = Item::Table(Table::new());
-            }
-            if let Some(servers) = doc.get_mut("mcp_servers").and_then(|i| i.as_table_like_mut()) {
-                let mut entry = Table::new();
-                entry["command"] = toml_edit::value("npx");
-                let mut args = Array::new();
-                for &arg in EDGEONE_MCP_NPX_ARGS {
-                    args.push(arg);
-                }
-                entry["args"] = TomlValue::Array(args).into();
-                let mut env_tbl = Table::new();
-                if let Some(token) = mcp.normalized_edgeone_api_token() {
-                    env_tbl["EDGEONE_PAGES_API_TOKEN"] = toml_edit::value(token);
-                }
-                if let Some(project) = mcp.normalized_edgeone_project_name() {
-                    env_tbl["EDGEONE_PAGES_PROJECT_NAME"] = toml_edit::value(project);
-                }
-                if !env_tbl.is_empty() {
-                    entry["env"] = Item::Table(env_tbl);
-                }
-                servers.insert(EDGEONE_MCP_SERVER_KEY, Item::Table(entry));
-            }
-        } else if let Some(servers) = doc.get_mut("mcp_servers").and_then(|i| i.as_table_like_mut()) {
+    fn remove_legacy_edgeone_mcp_server(doc: &mut DocumentMut) {
+        if let Some(servers) = doc.get_mut("mcp_servers").and_then(|i| i.as_table_like_mut()) {
             servers.remove(EDGEONE_MCP_SERVER_KEY);
             if servers.is_empty() {
                 doc.remove("mcp_servers");
@@ -314,11 +289,33 @@ impl CodexAdapter {
         }
     }
 
-    fn has_edgeone_mcp(doc: &DocumentMut) -> bool {
+    pub(crate) fn has_edgeone_mcp(doc: &DocumentMut) -> bool {
         doc.get("mcp_servers")
             .and_then(|i| i.as_table_like())
             .map(|t| t.contains_key(EDGEONE_MCP_SERVER_KEY))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn needs_mcp_refresh(paths: &AppPaths) -> bool {
+        let Ok(doc) = Self::read_doc(paths) else {
+            return false;
+        };
+        if Self::has_edgeone_mcp(&doc) {
+            return true;
+        }
+        let has_deploy_approval = doc
+            .get("mcp_servers")
+            .and_then(|i| i.as_table_like())
+            .and_then(|s| s.get("tako"))
+            .and_then(|i| i.as_table_like())
+            .and_then(|t| t.get("tools"))
+            .and_then(|i| i.as_table_like())
+            .map(|tools| {
+                tools.contains_key("tako_deploy_website")
+                    && tools.contains_key("tako_website_status")
+            })
+            .unwrap_or(false);
+        Self::has_tako_mcp(&doc) && !has_deploy_approval
     }
 }
 
@@ -438,7 +435,7 @@ impl DesktopAppAdapter for CodexAdapter {
                 Self::restore_backup_provider(&mut doc, paths);
                 Self::restore_backup_desktop_locale(&mut doc, paths);
                 Self::set_mcp_server(&mut doc, paths, false);
-                Self::set_edgeone_mcp_server(&mut doc, &McpToolsConfig::default(), false);
+                Self::remove_legacy_edgeone_mcp_server(&mut doc);
                 let absent_marker = paths.backups_dir("codex").join("config.toml.absent");
                 if doc.as_table().is_empty() && absent_marker.exists() && config_path.exists() {
                     fs::remove_file(&config_path)
@@ -521,9 +518,8 @@ impl DesktopAppAdapter for CodexAdapter {
                     providers.insert("tako", Item::Table(tako));
                 }
                 Self::set_mcp_server(&mut doc, paths, true);
-                Self::set_edgeone_mcp_server(&mut doc, &state.mcp, state.mcp.web_page);
-                let has_secret_in_toml = !state.codex_preserve_official_auth
-                    || (state.mcp.web_page && state.mcp.normalized_edgeone_api_token().is_some());
+                Self::remove_legacy_edgeone_mcp_server(&mut doc);
+                let has_secret_in_toml = !state.codex_preserve_official_auth;
                 write_atomic(&config_path, doc.to_string().as_bytes(), has_secret_in_toml)
             }
         }
@@ -604,7 +600,15 @@ impl DesktopAppAdapter for CodexAdapter {
                     notes.push("中文增强: 已启用 (localeOverride=zh-CN / AGENTS.md 简体中文规则)".to_string());
                 }
                 if Self::has_edgeone_mcp(&doc) {
-                    notes.push("网站上线 MCP (EdgeOne): 已启用 (tako-web-page)".to_string());
+                    notes.push(
+                        "提示: 检测到旧版 tako-web-page (npx) 配置，重新切换 Tako 可自动迁移至内置稳定版"
+                            .to_string(),
+                    );
+                } else if read_switch_state(paths).mcp.web_page && Self::has_tako_mcp(&doc) {
+                    notes.push(
+                        "网站上线 (EdgeOne): 已集成至 Tako 内置 MCP (tako_deploy_website)"
+                            .to_string(),
+                    );
                 }
                 if Self::has_tako_mcp(&doc) {
                     if let Some(cmd) = doc
@@ -918,7 +922,7 @@ localeOverride = "ja-JP"
     }
 
     #[test]
-    fn codex_edgeone_mcp_sync_enable_disable_and_official_preserves_other_servers() {
+    fn codex_edgeone_mcp_migrates_legacy_entry_and_approves_builtin_deploy_tools() {
         let tmp = TempDir::new().unwrap();
         let paths = AppPaths::for_test(tmp.path());
         fs::create_dir_all(&paths.codex_dir).unwrap();
@@ -928,6 +932,10 @@ localeOverride = "ja-JP"
 
 [mcp_servers.custom]
 command = "custom-mcp"
+
+[mcp_servers.tako-web-page]
+command = "npx"
+args = ["-y", "@edgeone/makers-mcp@latest", "--region", "china"]
 "#,
         )
         .unwrap();
@@ -937,65 +945,33 @@ command = "custom-mcp"
         st.mcp.web_page = true;
         save_switch_state(&paths, &st).unwrap();
 
+        assert!(CodexAdapter::needs_mcp_refresh(&paths));
+
         let adapter = CodexAdapter;
         adapter.apply_mode(&paths, AppMode::Tako).unwrap();
+
+        assert!(!CodexAdapter::needs_mcp_refresh(&paths));
 
         let doc = CodexAdapter::read_doc(&paths).unwrap();
         let servers = doc["mcp_servers"].as_table_like().unwrap();
         assert!(servers.contains_key("custom"));
         assert!(servers.contains_key("tako"));
-        let eo = servers
-            .get(EDGEONE_MCP_SERVER_KEY)
+        assert!(!servers.contains_key(EDGEONE_MCP_SERVER_KEY));
+
+        let tako_tools = servers
+            .get("tako")
+            .unwrap()
+            .as_table_like()
+            .unwrap()
+            .get("tools")
             .unwrap()
             .as_table_like()
             .unwrap();
-        assert_eq!(eo.get("command").and_then(|v| v.as_str()), Some("npx"));
-        assert!(eo.get("env").is_none());
+        assert!(tako_tools.contains_key("tako_deploy_website"));
+        assert!(tako_tools.contains_key("tako_website_status"));
 
-        // Add token & project -> env table written
-        st.mcp.edgeone_api_token = Some("eo_codex_tok".to_string());
-        st.mcp.edgeone_project_name = Some("codex-site".to_string());
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
-
-        let doc_tok = CodexAdapter::read_doc(&paths).unwrap();
-        let eo_tok = doc_tok["mcp_servers"]
-            .as_table_like()
-            .unwrap()
-            .get(EDGEONE_MCP_SERVER_KEY)
-            .unwrap()
-            .as_table_like()
-            .unwrap();
-        let env_tbl = eo_tok.get("env").unwrap().as_table_like().unwrap();
-        assert_eq!(
-            env_tbl
-                .get("EDGEONE_PAGES_API_TOKEN")
-                .and_then(|v| v.as_str()),
-            Some("eo_codex_tok")
-        );
-        assert_eq!(
-            env_tbl
-                .get("EDGEONE_PAGES_PROJECT_NAME")
-                .and_then(|v| v.as_str()),
-            Some("codex-site")
-        );
-
-        // Disable web_page -> removes tako-web-page, keeps tako and custom
-        st.mcp.web_page = false;
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
-        let doc_off_web = CodexAdapter::read_doc(&paths).unwrap();
-        let servers_off_web = doc_off_web["mcp_servers"].as_table_like().unwrap();
-        assert!(servers_off_web.contains_key("custom"));
-        assert!(servers_off_web.contains_key("tako"));
-        assert!(!servers_off_web.contains_key(EDGEONE_MCP_SERVER_KEY));
-
-        // Re-enable then switch to Official -> removes both tako and tako-web-page, keeps custom
-        st.mcp.web_page = true;
-        save_switch_state(&paths, &st).unwrap();
-        adapter.apply_mode(&paths, AppMode::Tako).unwrap();
+        // Switching to Official cleans up tako while keeping custom
         adapter.apply_mode(&paths, AppMode::Official).unwrap();
-
         let doc_official = CodexAdapter::read_doc(&paths).unwrap();
         let servers_official = doc_official["mcp_servers"].as_table_like().unwrap();
         assert!(servers_official.contains_key("custom"));

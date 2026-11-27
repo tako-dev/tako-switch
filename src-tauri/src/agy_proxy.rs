@@ -2502,11 +2502,14 @@ pub fn pretty_model_display_name(id: &str) -> String {
 pub fn model_context_window(id: &str) -> u64 {
     let lower = id.trim().to_ascii_lowercase();
     match lower.as_str() {
-        "claude-haiku-4-5" => 200_000,
+        "claude-haiku-4-5" | "claude-haiku-4-5-20251001" => 200_000,
+        _ if lower.starts_with("claude-haiku-4-5") => 200_000,
         "hy3" => 256_000,
         "swe-2-1" | "swe-2" | "swe-2-flash" => 262_000,
-        "gpt-5.5" => 1_100_000,
-        "gpt-6-astra" | "gpt-6.1-terra" => 1_050_000,
+        "kimi-k2.7-code" | "kimi-for-coding" | "gemma-4-31b-it" => 262_144,
+        "gpt-5.5" => 272_000,
+        "gpt-6-sol" | "gpt-6-astra" | "gpt-6-luna" | "gpt-6.1-sol" | "gpt-6.1-terra" => 450_000,
+        "minimax-m3" => 512_000,
         "gpt-4o-mini" => 128_000,
         _ if lower.starts_with("gpt-5.6") => 272_000,
         _ if lower.starts_with("grok-4.") => 500_000,
@@ -2593,21 +2596,21 @@ pub fn concise_model_description(id: &str, raw_desc: Option<&str>) -> String {
         "deepseek-v4-flash" => Some("1M · 高性价比推理编码"),
         "gpt-6.2-sol" => Some("1M · 6.2 编程与智能体主力"),
         "gpt-6.2-astra" => Some("1M · 6.2 端到端旗舰"),
-        "gpt-6.1-sol" => Some("1M · 6.1 编程与智能体主力"),
-        "gpt-6.1-terra" => Some("1M · 视觉与电脑操控档"),
-        "gpt-6-astra" => Some("1M · 端到端复杂工作旗舰"),
-        "gpt-6-sol" => Some("1M · 6 代编程主力档"),
-        "gpt-6-luna" => Some("1M · 6 代高性价比日常档"),
+        "gpt-6.1-sol" => Some("450K · 6.1 编程与智能体主力"),
+        "gpt-6.1-terra" => Some("450K · 视觉与电脑操控档"),
+        "gpt-6-astra" => Some("450K · 端到端复杂工作旗舰"),
+        "gpt-6-sol" => Some("450K · 6 代编程主力档"),
+        "gpt-6-luna" => Some("450K · 6 代高性价比日常档"),
         "gpt-5.6-sol" => Some("272K · 5.6 专业编码主力"),
         "gpt-5.6-terra" => Some("272K · 5.6 均衡日常档"),
         "gpt-5.6-luna" => Some("272K · 5.6 高性价比档"),
         "gpt-5.6" => Some("272K · 5.6 综合编码档"),
-        "gpt-5.5" => Some("1.1M · 编码与研究通用档"),
-        "gpt-4o-mini" => Some("轻量通用快速档"),
+        "gpt-5.5" => Some("272K · 编码与研究通用档"),
+        "gpt-4o-mini" => Some("128K · 轻量通用快速档"),
         "gemini-3.8-flash" => Some("1M · 高效多模态与编码"),
         "gemini-3.1-pro-preview" | "gemini-3.1-pro" => Some("1M · 高阶推理与多模态"),
         "gemini-3.5-flash-lite" => Some("1M · 轻量高吞吐日常档"),
-        "gemma-4-31b-it" => Some("开源指令模型（免费档）"),
+        "gemma-4-31b-it" => Some("262K · 开源指令模型（免费档）"),
         "glm-5.3" => Some("1M · 旗舰长程编码与交付"),
         "glm-5.3-flash" => Some("1M · 多模态高效编码"),
         "kimi-k3.1-pro" => Some("1M · 长上下文深度推理"),
@@ -2616,7 +2619,7 @@ pub fn concise_model_description(id: &str, raw_desc: Option<&str>) -> String {
         "grok-4.7" => Some("500K · 最新前沿编码与看图"),
         "grok-4.6" => Some("500K · 长程智能体与看图"),
         "grok-4.5" => Some("500K · 低幻觉对话与编码"),
-        "minimax-m3" => Some("1M · 多模态编码与推理"),
+        "minimax-m3" => Some("512K · 多模态编码与推理"),
         "mimo-v2.6-pro" => Some("1M · 旗舰长程智能体"),
         "mimo-v2.6-flash" => Some("1M · 高性价比 MoE 档"),
         "swe-2-1" => Some("262K · 新一代专精编码智能体"),
@@ -3565,6 +3568,93 @@ pub fn load_claude_inference_models(
     let catalog: Value = serde_json::from_slice(&bytes).ok()?;
     catalog.get("data").and_then(Value::as_array)?;
     Some(build_claude_inference_models(&catalog, filter))
+}
+
+/// Known non-Claude Tako models whose context window is strictly below the 1M ceiling
+/// inherited from `behavesAs: "claude-sonnet-5-5"`. Kept as a built-in fallback so
+/// `~/.claude/settings.json`'s `modelSettings.<wire_id>.autoCompactWindow` is always
+/// accurate even before `claude-catalog.json` is fetched from the gateway.
+const KNOWN_NON_1M_TAKO_CLAUDE_MODELS: &[&str] = &[
+    "swe-2-1",
+    "swe-2",
+    "swe-2-flash",
+    "grok-4.7",
+    "grok-4.6",
+    "grok-4.5",
+    "minimax-m3",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.6",
+    "gpt-5.5",
+    "hy3",
+    "kimi-k2.7-code",
+    "gemma-4-31b-it",
+    "gpt-4o-mini",
+];
+
+/// Returns `(wire_model_id, context_window)` pairs for non-Claude Tako wire models whose
+/// true context window is between 100K (Claude Code's minimum `autoCompactWindow`) and
+/// strictly below 1M (the ceiling inherited from `behavesAs: "claude-sonnet-5-5"`).
+/// Active models from `claude-catalog.json` come first so they always take priority.
+pub fn load_claude_model_context_windows(
+    paths: &AppPaths,
+    filter: &ClientModelFilter,
+) -> Vec<(String, u64)> {
+    const CLAUDE_CODE_MIN_AUTO_COMPACT_WINDOW: u64 = 100_000;
+    const CLAUDE_SONNET_5_5_WINDOW: u64 = 1_000_000;
+
+    let mut out: Vec<(String, u64)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let mut push_model = |raw_id: &str, catalog_window: Option<u64>| {
+        let wire_id = encode_claude_wire_model_id(raw_id);
+        if wire_id == raw_id {
+            // Native Claude model — Claude Code already knows its exact context window.
+            return;
+        }
+        let ctx = catalog_window.unwrap_or_else(|| model_context_window(raw_id));
+        if (CLAUDE_CODE_MIN_AUTO_COMPACT_WINDOW..CLAUDE_SONNET_5_5_WINDOW).contains(&ctx)
+            && seen.insert(wire_id.clone())
+        {
+            out.push((wire_id, ctx));
+        }
+    };
+
+    if let Ok(bytes) = fs::read(claude_catalog_cache_path(paths)) {
+        if let Ok(catalog) = serde_json::from_slice::<Value>(&bytes) {
+            let filtered = filter_claude_models_catalog(&catalog, filter);
+            for bucket in [filtered.get("data"), catalog.get("data")] {
+                if let Some(arr) = bucket.and_then(Value::as_array) {
+                    for m in arr {
+                        if let Some(raw_id) = m.get("id").and_then(Value::as_str) {
+                            // Prefer fresh `model_context_window(raw_id)` over stale cached
+                            // `max_input_tokens` so upgraded rules take effect immediately.
+                            let cached = m.get("max_input_tokens").and_then(Value::as_u64);
+                            let authoritative = model_context_window(raw_id);
+                            let ctx = if authoritative != CLAUDE_SONNET_5_5_WINDOW {
+                                Some(authoritative)
+                            } else {
+                                cached
+                            };
+                            push_model(raw_id, ctx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for &raw_id in KNOWN_NON_1M_TAKO_CLAUDE_MODELS {
+        push_model(raw_id, Some(model_context_window(raw_id)));
+    }
+
+    out
 }
 
 fn workbuddy_catalog_cache_path(paths: &AppPaths) -> std::path::PathBuf {
@@ -7402,7 +7492,7 @@ mod tests {
             None,
             pricing.prices.get("gemma-4-31b-it"),
         );
-        assert_eq!(free_desc, "开源指令模型（免费档）");
+        assert_eq!(free_desc, "262K · 开源指令模型（免费档）");
         let hy_free_desc = format_model_picker_description(
             "hy4flash-free",
             None,

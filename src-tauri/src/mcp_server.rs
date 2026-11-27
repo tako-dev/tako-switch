@@ -255,6 +255,67 @@ pub fn build_tools_catalog(cfg: &McpToolsConfig) -> Vec<Value> {
             }
         }));
     }
+    if cfg.web_page {
+        tools.push(json!({
+            "name": "tako_deploy_website",
+            "description": "Deploy a local website folder, single HTML file, or ZIP archive directly to Tencent Cloud EdgeOne Pages and return a live public HTTPS URL. Powered by Tako Switch's managed local EdgeOne CLI (no npx latency, automatic project naming, single-HTML auto-packaging). Requires Tencent Cloud EdgeOne login in Tako Switch (MCP Center -> Website Launch).",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            },
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or ~/ local path to the website directory (containing index.html or a buildable project), a single .html file (auto-wrapped as index.html), or a .zip archive."
+                    },
+                    "project_name": {
+                        "type": "string",
+                        "description": "Optional EdgeOne project slug (lowercase letters, digits, hyphens). Pass the same project_name to update an existing live site in place; omit to reuse linked/default project name or auto-generate one."
+                    },
+                    "environment": {
+                        "type": "string",
+                        "enum": ["production", "preview"],
+                        "description": "Target deployment environment (default: production)."
+                    },
+                    "area": {
+                        "type": "string",
+                        "enum": ["global", "overseas"],
+                        "description": "Edge acceleration area: global (includes China mainland + global, default) or overseas."
+                    }
+                },
+                "required": ["path"]
+            }
+        }));
+        tools.push(json!({
+            "name": "tako_website_status",
+            "description": "Check Tencent Cloud EdgeOne login status, active account/workspace, list available workspaces, or switch active workspace for tako_deploy_website.",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            },
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "list_workspaces", "switch_workspace"],
+                        "description": "Action to perform (default: status)."
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Target Workspace ID or name (required when action is switch_workspace)."
+                    }
+                },
+                "required": []
+            }
+        }));
+    }
     tools.push(json!({
         "name": "tako_account_status",
         "description": "Query the current Tako account balance (USD remaining and used), plan/subscription quota (if any), and gateway status in real time.",
@@ -333,7 +394,7 @@ pub async fn handle_jsonrpc_message(paths: &AppPaths, msg: Value) -> Option<Valu
                     "name": "tako-switch-mcp",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "instructions": "Prefer Tako MCP tools whenever the user asks for image generation/editing (tako_generate_image, default gpt-image-2), video generation (tako_generate_video, grok-imagine-video-1.5), speech synthesis (tako_generate_audio, default mimo-v2.5-tts), live web search (tako_web_search), a second-model opinion (tako_consult), or Tako balance/quota checks (tako_account_status). Follow tako-skill guardrails: preserve the user's explicit model choice; NEVER auto-retry paid image or video calls on timeout/error (check tako_account_status first, and pass resume_task_id for video recovery); cite actual results[].url on web search without fabricating URLs; never delegate image tasks to built-in `image-generator` subagents when Tako MCP is mounted."
+                "instructions": "Prefer Tako MCP tools whenever the user asks for image generation/editing (tako_generate_image, default gpt-image-2), video generation (tako_generate_video, grok-imagine-video-1.5), speech synthesis (tako_generate_audio, default mimo-v2.5-tts), live web search (tako_web_search), a second-model opinion (tako_consult), deploying/publishing a website or HTML page online (tako_deploy_website / tako_website_status), or Tako balance/quota checks (tako_account_status). Follow tako-skill guardrails: preserve the user's explicit model choice; NEVER auto-retry paid image or video calls on timeout/error (check tako_account_status first, and pass resume_task_id for video recovery); cite actual results[].url on web search without fabricating URLs; never delegate image tasks to built-in `image-generator` subagents when Tako MCP is mounted."
             }))
         }
         "ping" => Ok(json!({})),
@@ -427,10 +488,18 @@ async fn call_tool(paths: &AppPaths, name: &str, args: Value) -> Result<String, 
         "tako_generate_audio" => state.mcp.audio,
         "tako_web_search" => state.mcp.search,
         "tako_consult" => state.mcp.consult,
+        "tako_deploy_website" | "tako_website_status" => state.mcp.web_page,
         _ => return Err(format!("未知工具: {name}")),
     };
     if !enabled {
         return Err(format!("工具 `{name}` 当前已在 Tako Switch 中关闭"));
+    }
+
+    if name == "tako_deploy_website" {
+        return exec_deploy_website(paths, args).await;
+    }
+    if name == "tako_website_status" {
+        return exec_website_status(paths, args).await;
     }
 
     let api_key = read_main_api_key(paths)
@@ -1895,6 +1964,172 @@ pub async fn execute_live_demo_for_paths(
     }
 }
 
+async fn exec_deploy_website(paths: &AppPaths, args: Value) -> Result<String, String> {
+    let path = args
+        .get("path")
+        .or_else(|| args.get("folder_path"))
+        .or_else(|| args.get("directory"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "缺少必需参数 path（请传入本地网站目录路径、单个 .html 文件路径或 .zip 压缩包路径）"
+                .to_string()
+        })?
+        .to_string();
+
+    let project_name = args
+        .get("project_name")
+        .or_else(|| args.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let environment = args
+        .get("environment")
+        .or_else(|| args.get("env"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let area = args
+        .get("area")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let res = crate::edgeone::deploy_website(
+        paths,
+        crate::edgeone::EdgeOneDeployRequest {
+            path,
+            project_name,
+            environment,
+            area,
+        },
+    )
+    .await?;
+
+    let mut lines = vec![
+        "网站已成功部署至腾讯云 EdgeOne！".to_string(),
+        format!("- 公网访问地址: {}", res.url),
+        format!("- 项目名称: {}", res.project_name),
+        format!("- 部署环境: {}（加速区域: {}）", res.environment, res.area),
+    ];
+    if let Some(pid) = res.project_id {
+        lines.push(format!("- 项目 ID: {pid}"));
+    }
+    if let Some(did) = res.deployment_id {
+        lines.push(format!("- 部署 ID: {did}"));
+    }
+    if let Some(console) = res.console_url {
+        lines.push(format!("- 腾讯云控制台: {console}"));
+    }
+    lines.push(format!(
+        "提示：后续修改该网站并原地更新同一地址时，请传入 project_name=\"{}\"。",
+        res.project_name
+    ));
+    Ok(lines.join("\n"))
+}
+
+async fn exec_website_status(paths: &AppPaths, args: Value) -> Result<String, String> {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "status".to_string());
+
+    let status = match action.as_str() {
+        "switch_workspace" => {
+            let target = args
+                .get("workspace")
+                .or_else(|| args.get("workspace_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "切换工作空间需要传入 workspace（Workspace ID 或名称）".to_string())?;
+            crate::edgeone::switch_workspace(paths, target).await?
+        }
+        "status" | "list_workspaces" => {
+            if crate::edgeone::resolve_edgeone_runtime(paths).is_none()
+                && (crate::edgeone::has_local_edgeone_credentials(paths)
+                    || read_switch_state(paths)
+                        .mcp
+                        .normalized_edgeone_api_token()
+                        .is_some())
+            {
+                let _ = crate::edgeone::ensure_edgeone_cli(paths, false, &|_| {}).await;
+            }
+            crate::edgeone::get_status(paths, true).await
+        }
+        other => {
+            return Err(format!(
+                "不支持的 action `{other}`，可选值：status、list_workspaces、switch_workspace"
+            ));
+        }
+    };
+
+    if !status.authenticated {
+        let mut msg = vec![
+            "腾讯云 EdgeOne 当前未登录。".to_string(),
+            format!(
+                "- 运行环境: Node {} / EdgeOne CLI {}",
+                status.node_version.as_deref().unwrap_or("待自动安装"),
+                status.cli_version.as_deref().unwrap_or("待自动安装")
+            ),
+            "- 操作指引: 请打开 Tako Switch → 左侧「MCP 能力」→「网站上线 · Tako Web Page」卡片，点击「一键登录腾讯云 EdgeOne」完成浏览器授权。".to_string(),
+        ];
+        if let Some(err) = status.error {
+            msg.push(format!("- 详情: {err}"));
+        }
+        return Ok(msg.join("\n"));
+    }
+
+    let mut lines = vec![
+        "腾讯云 EdgeOne 已就绪。".to_string(),
+        format!(
+            "- 认证方式: {}",
+            if status.auth_mode == "api_token" {
+                "API Token"
+            } else {
+                "腾讯云账号浏览器授权"
+            }
+        ),
+    ];
+    if let Some(acc) = status.account_name.as_deref().or(status.account_id.as_deref()) {
+        lines.push(format!("- 腾讯云账号: {acc}"));
+    }
+    if let Some(ws_name) = status.workspace_name.as_deref() {
+        let ws_id = status.workspace_id.as_deref().unwrap_or("-");
+        let plan = status.plan.as_deref().unwrap_or("-");
+        let ws_st = status.workspace_status.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "- 当前工作空间: {ws_name} ({ws_id}) · 套餐: {plan} · 状态: {ws_st}"
+        ));
+    }
+    if let Some(ver) = status.cli_version.as_deref() {
+        lines.push(format!(
+            "- 托管组件: EdgeOne CLI v{ver} (Node {})",
+            status.node_version.as_deref().unwrap_or("-")
+        ));
+    }
+    if !status.workspaces.is_empty() {
+        lines.push("- 可用工作空间列表:".to_string());
+        for ws in &status.workspaces {
+            let cur = if ws.current { " [当前]" } else { "" };
+            let avail = if ws.available { "可用" } else { "不可用" };
+            lines.push(format!(
+                "  * {} ({}) — {} / {}{}",
+                ws.name, ws.id, ws.plan, avail, cur
+            ));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1990,6 +2225,39 @@ mod tests {
                 "tako_account_status"
             ]
         );
+
+        // Enabling web_page exposes tako_deploy_website & tako_website_status directly inside tako MCP
+        st.mcp.web_page = true;
+        save_switch_state(&paths, &st).unwrap();
+        let resp_web = handle_jsonrpc_message(
+            &paths,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        )
+        .await
+        .unwrap();
+        let names_web: Vec<&str> = resp_web["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names_web.contains(&"tako_deploy_website"));
+        assert!(names_web.contains(&"tako_website_status"));
+
+        // Disabling web_page rejects calls cleanly
+        st.mcp.web_page = false;
+        save_switch_state(&paths, &st).unwrap();
+        let resp_disabled = handle_jsonrpc_message(
+            &paths,
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tako_deploy_website","arguments":{"path":"/tmp"}}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp_disabled["result"]["isError"], true);
+        assert!(resp_disabled["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("已在 Tako Switch 中关闭"));
     }
 
     #[test]
