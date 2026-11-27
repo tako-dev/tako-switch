@@ -3,10 +3,10 @@ pub mod agy_proxy;
 pub mod auth;
 pub mod client_monitor;
 pub mod config;
+pub mod extensions;
 pub mod installer;
 pub mod manifest;
 pub mod mcp_server;
-pub mod sync_hub;
 pub mod telemetry;
 
 use adapters::{
@@ -2359,80 +2359,224 @@ async fn run_mcp_live_demo(
     mcp_server::execute_live_demo_for_paths(&paths, input).await
 }
 
+use extensions::with_extension_paths;
+
 #[tauri::command]
-async fn get_multi_platform_sync_snapshot() -> Result<sync_hub::MultiPlatformSyncSnapshot, String> {
-    let paths = AppPaths::detect()?;
-    tauri::async_runtime::spawn_blocking(move || sync_hub::build_multi_platform_sync_snapshot(&paths))
-        .await
-        .map_err(|e| format!("扫描多平台 MCP/Skill 失败: {e}"))
+async fn get_extensions_summary() -> Result<extensions::ExtensionsSummary, String> {
+    with_extension_paths(extensions::get_extensions_summary_for_paths).await
 }
 
 #[tauri::command]
-async fn sync_mcp_to_platforms(
+async fn get_mcp_hub_snapshot() -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(extensions::mcp::get_mcp_hub_snapshot_for_paths).await
+}
+
+#[tauri::command]
+async fn upsert_mcp_entry(
+    entry: extensions::mcp::McpEntry,
+) -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(move |paths| extensions::mcp::upsert_mcp_entry_for_paths(paths, entry)).await
+}
+
+#[tauri::command]
+async fn toggle_mcp_platform(
+    id: String,
+    platform: extensions::ExtPlatform,
+    enabled: bool,
+) -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::mcp::toggle_mcp_platform_for_paths(paths, &id, platform, enabled)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_mcp_entry(id: String) -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(move |paths| extensions::mcp::delete_mcp_entry_for_paths(paths, &id)).await
+}
+
+#[tauri::command]
+async fn align_mcp_entry(
+    id: String,
+    source: Option<extensions::ExtPlatform>,
+) -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::mcp::align_mcp_entry_for_paths(paths, &id, source)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn align_all_mcp_entries() -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(extensions::mcp::align_all_mcp_entries_for_paths).await
+}
+
+#[tauri::command]
+fn parse_mcp_snippet(snippet: String) -> Result<Vec<extensions::mcp::McpEntry>, String> {
+    extensions::mcp::parse_mcp_snippet(&snippet)
+}
+
+#[tauri::command]
+async fn export_mcp_backup() -> Result<String, String> {
+    with_extension_paths(extensions::mcp::export_mcp_backup_for_paths).await
+}
+
+#[tauri::command]
+async fn import_mcp_backup(backup: String) -> Result<extensions::mcp::McpHubSnapshot, String> {
+    with_extension_paths(move |paths| extensions::mcp::import_mcp_backup_for_paths(paths, &backup)).await
+}
+
+#[tauri::command]
+async fn get_prompts_hub_snapshot() -> Result<extensions::prompts::PromptsHubSnapshot, String> {
+    with_extension_paths(extensions::prompts::get_prompts_hub_snapshot_for_paths).await
+}
+
+#[tauri::command]
+async fn upsert_prompt_preset(
+    platform: extensions::ExtPlatform,
+    preset: extensions::prompts::PromptPreset,
+) -> Result<extensions::prompts::PromptsHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::prompts::upsert_prompt_preset_for_paths(paths, platform, preset)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn activate_prompt_preset(
+    platform: extensions::ExtPlatform,
+    id: Option<String>,
+) -> Result<extensions::prompts::PromptsHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::prompts::activate_prompt_preset_for_paths(paths, platform, id.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_prompt_preset(
+    platform: extensions::ExtPlatform,
+    id: String,
+) -> Result<extensions::prompts::PromptsHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::prompts::delete_prompt_preset_for_paths(paths, platform, &id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn sync_prompt_to_platforms(
+    source: extensions::ExtPlatform,
+    id: String,
+    targets: Vec<extensions::ExtPlatform>,
+    activate: bool,
+) -> Result<extensions::prompts::PromptsHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::prompts::sync_prompt_to_platforms_for_paths(paths, source, &id, &targets, activate)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn export_prompts_backup() -> Result<String, String> {
+    with_extension_paths(extensions::prompts::export_prompts_backup_for_paths).await
+}
+
+#[tauri::command]
+async fn import_prompts_backup(
+    backup: String,
+) -> Result<extensions::prompts::PromptsHubSnapshot, String> {
+    with_extension_paths(move |paths| {
+        extensions::prompts::import_prompts_backup_for_paths(paths, &backup)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_plugins_hub_snapshot(
+    platform: extensions::ExtPlatform,
+    include_available: Option<bool>,
+) -> Result<extensions::plugins::PluginsHubSnapshot, extensions::plugins::PluginError> {
+    let paths = AppPaths::detect()?;
+    extensions::plugins::get_plugins_hub_snapshot_for_paths(
+        &paths,
+        platform,
+        include_available.unwrap_or(true),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn toggle_plugin_enabled(
+    platform: extensions::ExtPlatform,
+    id: String,
+    enabled: bool,
+) -> Result<extensions::plugins::PluginActionOutcome, extensions::plugins::PluginError> {
+    let paths = AppPaths::detect()?;
+    extensions::plugins::execute_plugin_action_for_paths(
+        &paths, platform, extensions::plugins::PluginAction::Toggle(enabled), &id,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn install_plugin_entry(
+    platform: extensions::ExtPlatform,
+    id: String,
+) -> Result<extensions::plugins::PluginActionOutcome, extensions::plugins::PluginError> {
+    let paths = AppPaths::detect()?;
+    extensions::plugins::execute_plugin_action_for_paths(
+        &paths, platform, extensions::plugins::PluginAction::Install, &id,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn update_plugin_entry(
+    platform: extensions::ExtPlatform,
+    id: String,
+) -> Result<extensions::plugins::PluginActionOutcome, extensions::plugins::PluginError> {
+    let paths = AppPaths::detect()?;
+    extensions::plugins::execute_plugin_action_for_paths(
+        &paths, platform, extensions::plugins::PluginAction::Update, &id,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn uninstall_plugin_entry(
+    platform: extensions::ExtPlatform,
+    id: String,
+) -> Result<extensions::plugins::PluginActionOutcome, extensions::plugins::PluginError> {
+    let paths = AppPaths::detect()?;
+    extensions::plugins::execute_plugin_action_for_paths(
+        &paths, platform, extensions::plugins::PluginAction::Uninstall, &id,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn add_plugin_marketplace(
+    platform: extensions::ExtPlatform,
+    source: String,
+) -> Result<extensions::plugins::PluginActionOutcome, extensions::plugins::PluginError> {
+    let paths = AppPaths::detect()?;
+    extensions::plugins::execute_plugin_action_for_paths(
+        &paths, platform, extensions::plugins::PluginAction::AddMarketplace, &source,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn remove_plugin_marketplace(
+    platform: extensions::ExtPlatform,
     name: String,
-    source: sync_hub::SyncPlatform,
-    targets: Vec<sync_hub::SyncPlatform>,
-) -> Result<sync_hub::MultiPlatformSyncSnapshot, String> {
+) -> Result<extensions::plugins::PluginActionOutcome, extensions::plugins::PluginError> {
     let paths = AppPaths::detect()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_hub::sync_mcp_to_platforms_for_paths(&paths, &name, source, &targets)
-    })
+    extensions::plugins::execute_plugin_action_for_paths(
+        &paths, platform, extensions::plugins::PluginAction::RemoveMarketplace, &name,
+    )
     .await
-    .map_err(|e| format!("同步 MCP 失败: {e}"))?
-}
-
-#[tauri::command]
-async fn sync_all_mcps(
-    targets: Vec<sync_hub::SyncPlatform>,
-    preferred_source: Option<sync_hub::SyncPlatform>,
-) -> Result<sync_hub::BatchSyncOutcome, String> {
-    let paths = AppPaths::detect()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_hub::sync_all_mcps_for_paths(&paths, &targets, preferred_source)
-    })
-    .await
-    .map_err(|e| format!("批量同步 MCP 失败: {e}"))?
-}
-
-#[tauri::command]
-async fn sync_skill_to_platforms(
-    name: String,
-    source: sync_hub::SyncPlatform,
-    targets: Vec<sync_hub::SyncPlatform>,
-) -> Result<sync_hub::MultiPlatformSyncSnapshot, String> {
-    let paths = AppPaths::detect()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_hub::sync_skill_to_platforms_for_paths(&paths, &name, source, &targets)
-    })
-    .await
-    .map_err(|e| format!("同步 Skill 失败: {e}"))?
-}
-
-#[tauri::command]
-async fn sync_all_skills(
-    targets: Vec<sync_hub::SyncPlatform>,
-    preferred_source: Option<sync_hub::SyncPlatform>,
-) -> Result<sync_hub::BatchSyncOutcome, String> {
-    let paths = AppPaths::detect()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_hub::sync_all_skills_for_paths(&paths, &targets, preferred_source)
-    })
-    .await
-    .map_err(|e| format!("批量同步 Skill 失败: {e}"))?
-}
-
-#[tauri::command]
-async fn remove_synced_item(
-    kind: String,
-    name: String,
-    platform: sync_hub::SyncPlatform,
-) -> Result<sync_hub::MultiPlatformSyncSnapshot, String> {
-    let paths = AppPaths::detect()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_hub::remove_synced_item_for_paths(&paths, &kind, &name, platform)
-    })
-    .await
-    .map_err(|e| format!("移除同步项失败: {e}"))?
 }
 
 #[tauri::command]
@@ -2921,12 +3065,45 @@ pub fn run() {
             install_self_update,
             run_mcp_live_demo,
             check_node_runtime,
-            get_multi_platform_sync_snapshot,
-            sync_mcp_to_platforms,
-            sync_all_mcps,
-            sync_skill_to_platforms,
-            sync_all_skills,
-            remove_synced_item,
+            get_extensions_summary,
+            get_mcp_hub_snapshot,
+            upsert_mcp_entry,
+            toggle_mcp_platform,
+            delete_mcp_entry,
+            align_mcp_entry,
+            align_all_mcp_entries,
+            parse_mcp_snippet,
+            export_mcp_backup,
+            import_mcp_backup,
+            get_prompts_hub_snapshot,
+            upsert_prompt_preset,
+            activate_prompt_preset,
+            delete_prompt_preset,
+            sync_prompt_to_platforms,
+            export_prompts_backup,
+            import_prompts_backup,
+            extensions::skills::get_skills_hub_snapshot,
+            extensions::skills::toggle_skill_platform,
+            extensions::skills::align_skill_platforms,
+            extensions::skills::uninstall_skill,
+            extensions::skills::set_skill_sync_method,
+            extensions::skills::set_skill_default_targets,
+            extensions::skills::stage_skill_zip_chunk,
+            extensions::skills::discard_skill_zip_upload,
+            extensions::skills::import_local_skill,
+            extensions::skills::scan_adopt_local_skills,
+            extensions::skills::upsert_skill_repo,
+            extensions::skills::remove_skill_repo,
+            extensions::skills::discover_repo_skills,
+            extensions::skills::install_discovered_skill,
+            extensions::skills::update_installed_skill,
+            get_plugins_hub_snapshot,
+            toggle_plugin_enabled,
+            install_plugin_entry,
+            update_plugin_entry,
+            uninstall_plugin_entry,
+            add_plugin_marketplace,
+            remove_plugin_marketplace,
             report_frontend_error,
             submit_user_feedback,
             get_sanitized_diagnostics_preview,

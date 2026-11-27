@@ -458,54 +458,229 @@ export interface LiveDemoResult {
   citations: LiveDemoCitation[];
 }
 
-export type SyncPlatform = "claude" | "codex" | "antigravity" | "workbuddy";
+export type ExtPlatform = "claude" | "codex" | "antigravity";
+export type SkillSyncMethod = "auto" | "symlink" | "copy";
+export type SkillLinkMode = "symlink" | "copy";
+export type SkillSource = "local" | "adopted" | "zip" | "github";
 
-export interface SyncedMcpSpec {
-  transport: string;
-  command?: string | null;
+export type PluginCliSource = "builtin" | "path";
+
+export interface PluginEntry {
+  id: string;
+  name: string;
+  displayName: string;
+  version: string | null;
+  description: string;
+  category: string | null;
+  marketplace: string | null;
+  installPath: string | null;
+  dirName: string | null;
+  scope: string | null;
+  enabled: boolean;
+  manageable: boolean;
+  removable: boolean;
+  needsConfiguration: boolean;
+}
+
+export interface PluginMarketplace {
+  name: string;
+  source: string;
+  installLocation: string | null;
+  manageable: boolean;
+}
+
+export interface PluginsHubSnapshot {
+  platform: ExtPlatform;
+  cliAvailable: boolean;
+  cliPath: string | null;
+  cliSource: PluginCliSource | null;
+  marketplacesSupported: boolean;
+  installed: PluginEntry[];
+  available: PluginEntry[];
+  marketplaces: PluginMarketplace[];
+  catalogFromCache: boolean;
+  warnings: string[];
+}
+
+export interface PluginActionOutcome {
+  platform: ExtPlatform;
+  pluginId: string;
+  needsConfiguration: boolean;
+  message: string;
+}
+
+export interface PluginError {
+  errorCode: string;
+  message: string;
+  detail: string | null;
+}
+
+export function parsePluginError(error: unknown): PluginError {
+  if (typeof error === "object" && error !== null && "errorCode" in error && "message" in error) {
+    return {
+      errorCode: String(error.errorCode),
+      message: String(error.message),
+      detail: "detail" in error && typeof error.detail === "string" ? error.detail : null,
+    };
+  }
+  return { errorCode: "PLUGIN_UNKNOWN_ERROR", message: String(error), detail: null };
+}
+
+export interface SkillRepo {
+  owner: string;
+  name: string;
+  branch: string;
+  enabled: boolean;
+  archiveUrlOverride?: string | null;
+}
+
+export interface SkillRecord {
+  id: string;
+  name: string;
+  description: string;
+  source: SkillSource;
+  repoOwner: string | null;
+  repoName: string | null;
+  repoBranch: string | null;
+  repoSubdir: string | null;
+  installedHash: string;
+  remoteHash: string | null;
+  updateAvailable: boolean;
+  enabledPlatforms: ExtPlatform[];
+}
+
+export interface SkillTargetStatus {
+  path: string;
+  actualMethod: SkillLinkMode | null;
+  hasDiff: boolean;
+}
+
+export interface SkillPlatformStatus {
+  enabled: boolean;
+  actualMethod: SkillLinkMode | null;
+  hasDiff: boolean;
+  targets: SkillTargetStatus[];
+}
+
+export interface ManagedSkill {
+  skill: SkillRecord;
+  masterPath: string;
+  platforms: Record<ExtPlatform, SkillPlatformStatus>;
+  locallyModified: boolean;
+}
+
+export interface SkillsHubSnapshot {
+  syncMethod: SkillSyncMethod;
+  defaultTargets: ExtPlatform[];
+  masterDir: string;
+  skills: ManagedSkill[];
+  repos: SkillRepo[];
+  warnings?: string[];
+}
+
+export interface DiscoverableSkill {
+  id: string;
+  name: string;
+  description: string;
+  repoOwner: string;
+  repoName: string;
+  repoBranch: string;
+  repoSubdir: string;
+  remoteHash: string;
+  installedId: string | null;
+  updateAvailable: boolean;
+}
+
+export interface ImportLocalSkillRequest {
+  path?: string | null;
+  zipBase64?: string | null;
+  uploadId?: string | null;
+  targets?: ExtPlatform[];
+}
+
+export interface ExtensionsSummary {
+  mcpCount: number;
+  skillsCount: number;
+  skillsUpdatableCount?: number;
+  pluginsCount: number;
+  promptsCount: number;
+}
+
+export interface McpSpec {
+  transport: "stdio" | "http";
+  command: string | null;
   args: string[];
   env: Record<string, string>;
-  url?: string | null;
+  url: string | null;
   headers: Record<string, string>;
-  summary: string;
+  extra: Record<string, unknown>;
 }
 
-export interface PlatformMcpItem {
+export interface McpEntry {
+  id: string;
   name: string;
-  managedByTako: boolean;
-  platforms: SyncPlatform[];
-  variants: Partial<Record<SyncPlatform, SyncedMcpSpec>>;
+  spec: McpSpec;
+  platforms: ExtPlatform[];
+  variants: Partial<Record<ExtPlatform, McpSpec>>;
   hasDiff: boolean;
 }
 
-export interface PlatformSkillItem {
+export interface McpHubSnapshot {
+  entries: McpEntry[];
+  platformPaths: Record<ExtPlatform, string[]>;
+  warnings: string[];
+}
+
+export interface PromptPreset {
+  id: string;
   name: string;
-  title: string;
-  description: string;
-  platforms: SyncPlatform[];
-  fileCounts: Partial<Record<SyncPlatform, number>>;
-  modifiedMs: Partial<Record<SyncPlatform, number>>;
-  hasDiff: boolean;
+  content: string;
 }
 
-export interface PlatformSyncPaths {
-  mcpPath: string;
-  skillsDir: string;
+export interface PromptPlatformSnapshot {
+  presets: PromptPreset[];
+  activeId: string | null;
+  path: string;
+  liveBytes: number;
+  hasChineseBlock: boolean;
 }
 
-export interface MultiPlatformSyncSnapshot {
-  mcpItems: PlatformMcpItem[];
-  skillItems: PlatformSkillItem[];
-  platformPaths: Partial<Record<SyncPlatform, PlatformSyncPaths>>;
-}
-
-export interface BatchSyncOutcome {
-  syncedItems: number;
-  syncedWrites: number;
-  snapshot: MultiPlatformSyncSnapshot;
+export interface PromptsHubSnapshot {
+  platforms: Record<ExtPlatform, PromptPlatformSnapshot>;
 }
 
 export const api = {
+  getSkillsHubSnapshot: () => invoke<SkillsHubSnapshot>("get_skills_hub_snapshot"),
+  toggleSkillPlatform: (id: string, platform: ExtPlatform, enabled: boolean) =>
+    invoke<SkillsHubSnapshot>("toggle_skill_platform", { id, platform, enabled }),
+  alignSkillPlatforms: (id: string, targets: ExtPlatform[]) =>
+    invoke<SkillsHubSnapshot>("align_skill_platforms", { id, targets }),
+  uninstallSkill: (id: string) => invoke<SkillsHubSnapshot>("uninstall_skill", { id }),
+  setSkillSyncMethod: (method: SkillSyncMethod) =>
+    invoke<SkillsHubSnapshot>("set_skill_sync_method", { method }),
+  setSkillDefaultTargets: (targets: ExtPlatform[]) =>
+    invoke<SkillsHubSnapshot>("set_skill_default_targets", { targets }),
+  stageSkillZipChunk: (uploadId: string | null, chunkBase64: string) =>
+    invoke<string>("stage_skill_zip_chunk", { uploadId, chunkBase64 }),
+  discardSkillZipUpload: (uploadId: string) =>
+    invoke<void>("discard_skill_zip_upload", { uploadId }),
+  importLocalSkill: (input: ImportLocalSkillRequest) =>
+    invoke<SkillsHubSnapshot>("import_local_skill", { input }),
+  scanAdoptLocalSkills: () => invoke<SkillsHubSnapshot>("scan_adopt_local_skills"),
+  upsertSkillRepo: (repo: SkillRepo) =>
+    invoke<SkillsHubSnapshot>("upsert_skill_repo", { repo }),
+  removeSkillRepo: (owner: string, name: string) =>
+    invoke<SkillsHubSnapshot>("remove_skill_repo", { owner, name }),
+  discoverRepoSkills: (owner: string, name: string) =>
+    invoke<DiscoverableSkill[]>("discover_repo_skills", { owner, name }),
+  installDiscoveredSkill: (
+    owner: string,
+    name: string,
+    subdir: string,
+    targets: ExtPlatform[],
+  ) => invoke<SkillsHubSnapshot>("install_discovered_skill", { owner, name, subdir, targets }),
+  updateInstalledSkill: (id: string) =>
+    invoke<SkillsHubSnapshot>("update_installed_skill", { id }),
   getDashboard: (refreshAccount: boolean) =>
     invoke<DashboardPayload>("get_dashboard", { refreshAccount }),
   getRunningStates: () =>
@@ -579,54 +754,43 @@ export const api = {
   runMcpLiveDemo: (input: LiveDemoRequest) =>
     invoke<LiveDemoResult>("run_mcp_live_demo", { input }),
   checkNodeRuntime: () => invoke<NodeRuntimeInfo>("check_node_runtime"),
-  getMultiPlatformSyncSnapshot: () =>
-    invoke<MultiPlatformSyncSnapshot>("get_multi_platform_sync_snapshot"),
-  syncMcpToPlatforms: (
-    name: string,
-    source: SyncPlatform,
-    targets: SyncPlatform[],
-  ) =>
-    invoke<MultiPlatformSyncSnapshot>("sync_mcp_to_platforms", {
-      name,
-      source,
-      targets,
-    }),
-  syncAllMcps: (
-    targets: SyncPlatform[],
-    preferredSource?: SyncPlatform | null,
-  ) =>
-    invoke<BatchSyncOutcome>("sync_all_mcps", {
-      targets,
-      preferredSource: preferredSource ?? null,
-    }),
-  syncSkillToPlatforms: (
-    name: string,
-    source: SyncPlatform,
-    targets: SyncPlatform[],
-  ) =>
-    invoke<MultiPlatformSyncSnapshot>("sync_skill_to_platforms", {
-      name,
-      source,
-      targets,
-    }),
-  syncAllSkills: (
-    targets: SyncPlatform[],
-    preferredSource?: SyncPlatform | null,
-  ) =>
-    invoke<BatchSyncOutcome>("sync_all_skills", {
-      targets,
-      preferredSource: preferredSource ?? null,
-    }),
-  removeSyncedItem: (
-    kind: "mcp" | "skill",
-    name: string,
-    platform: SyncPlatform,
-  ) =>
-    invoke<MultiPlatformSyncSnapshot>("remove_synced_item", {
-      kind,
-      name,
-      platform,
-    }),
+  getExtensionsSummary: () => invoke<ExtensionsSummary>("get_extensions_summary"),
+  getMcpHubSnapshot: () => invoke<McpHubSnapshot>("get_mcp_hub_snapshot"),
+  upsertMcpEntry: (entry: McpEntry) => invoke<McpHubSnapshot>("upsert_mcp_entry", { entry }),
+  toggleMcpPlatform: (id: string, platform: ExtPlatform, enabled: boolean) =>
+    invoke<McpHubSnapshot>("toggle_mcp_platform", { id, platform, enabled }),
+  deleteMcpEntry: (id: string) => invoke<McpHubSnapshot>("delete_mcp_entry", { id }),
+  alignMcpEntry: (id: string, source: ExtPlatform | null = null) =>
+    invoke<McpHubSnapshot>("align_mcp_entry", { id, source }),
+  alignAllMcpEntries: () => invoke<McpHubSnapshot>("align_all_mcp_entries"),
+  parseMcpSnippet: (snippet: string) => invoke<McpEntry[]>("parse_mcp_snippet", { snippet }),
+  exportMcpBackup: () => invoke<string>("export_mcp_backup"),
+  importMcpBackup: (backup: string) => invoke<McpHubSnapshot>("import_mcp_backup", { backup }),
+  getPromptsHubSnapshot: () => invoke<PromptsHubSnapshot>("get_prompts_hub_snapshot"),
+  upsertPromptPreset: (platform: ExtPlatform, preset: PromptPreset) =>
+    invoke<PromptsHubSnapshot>("upsert_prompt_preset", { platform, preset }),
+  activatePromptPreset: (platform: ExtPlatform, id: string | null) =>
+    invoke<PromptsHubSnapshot>("activate_prompt_preset", { platform, id }),
+  deletePromptPreset: (platform: ExtPlatform, id: string) =>
+    invoke<PromptsHubSnapshot>("delete_prompt_preset", { platform, id }),
+  syncPromptToPlatforms: (source: ExtPlatform, id: string, targets: ExtPlatform[], activate: boolean) =>
+    invoke<PromptsHubSnapshot>("sync_prompt_to_platforms", { source, id, targets, activate }),
+  exportPromptsBackup: () => invoke<string>("export_prompts_backup"),
+  importPromptsBackup: (backup: string) => invoke<PromptsHubSnapshot>("import_prompts_backup", { backup }),
+  getPluginsHubSnapshot: (platform: ExtPlatform, includeAvailable = true) =>
+    invoke<PluginsHubSnapshot>("get_plugins_hub_snapshot", { platform, includeAvailable }),
+  togglePluginEnabled: (platform: ExtPlatform, id: string, enabled: boolean) =>
+    invoke<PluginActionOutcome>("toggle_plugin_enabled", { platform, id, enabled }),
+  installPluginEntry: (platform: ExtPlatform, id: string) =>
+    invoke<PluginActionOutcome>("install_plugin_entry", { platform, id }),
+  updatePluginEntry: (platform: ExtPlatform, id: string) =>
+    invoke<PluginActionOutcome>("update_plugin_entry", { platform, id }),
+  uninstallPluginEntry: (platform: ExtPlatform, id: string) =>
+    invoke<PluginActionOutcome>("uninstall_plugin_entry", { platform, id }),
+  addPluginMarketplace: (platform: ExtPlatform, source: string) =>
+    invoke<PluginActionOutcome>("add_plugin_marketplace", { platform, source }),
+  removePluginMarketplace: (platform: ExtPlatform, name: string) =>
+    invoke<PluginActionOutcome>("remove_plugin_marketplace", { platform, name }),
   reportFrontendError: (input: FrontendErrorInput) =>
     invoke<void>("report_frontend_error", { input }).catch(() => {
       // Telemetry error capture must never disrupt the UI.

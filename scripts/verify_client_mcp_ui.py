@@ -74,6 +74,40 @@ REQUIRED_TESTIDS = [
     "mcp-toggle-webpage",
 ]
 
+REQUIRED_EXT_HUB_TESTIDS = [
+    "ext-hub-home-section",
+    "open-ext-hub",
+    "open-ext-hub-mcp",
+    "open-ext-hub-skills",
+    "open-ext-hub-plugins",
+    "open-ext-hub-prompts",
+    "ext-hub-tab-mcp",
+    "ext-hub-tab-skills",
+    "ext-hub-tab-plugins",
+    "ext-hub-tab-prompts",
+    "ext-hub-actions",
+    "ext-mcp-tako-notice",
+    "ext-mcp-goto-super",
+    "ext-mcp-search",
+    "ext-mcp-add-btn",
+    "ext-skills-view",
+    "ext-skills-import-btn",
+    "ext-skills-search",
+    "ext-skills-subtab-installed",
+    "ext-skills-subtab-discover",
+    "ext-plugins-view",
+    "ext-plugins-market-btn",
+    "ext-plugins-refresh-btn",
+    "ext-plugins-search",
+    "ext-plugins-empty-unsupported",
+    "ext-prompts-new-btn",
+    "ext-prompts-platform-claude",
+    "ext-prompts-platform-codex",
+    "ext-prompts-platform-antigravity",
+    "ext-prompts-sync-other-btn",
+    "ext-prompts-save-btn",
+]
+
 AGY_ZH_DICT_REL = Path("src-tauri/src/adapters/antigravity_zh_dict.json")
 MIN_AGY_ZH_DICT_ENTRIES = 1200
 REQUIRED_AGY_ZH_DICT_KEYS = (
@@ -111,6 +145,8 @@ FORBIDDEN_LEGACY_ASSETS = [
 
 FORBIDDEN_LEGACY_FILES = [
     Path("src/components/McpShowcaseModal.tsx"),
+    Path("src/components/MultiPlatformSyncPanel.tsx"),
+    Path("src-tauri/src/sync_hub.rs"),
 ]
 
 CONTROLLED_AGY_I18N_REL = Path("src-tauri/src/adapters/antigravity_i18n.rs")
@@ -136,10 +172,69 @@ FORBIDDEN_EXTERNAL_ASAR_PATTERNS = [
     (re.compile(r"\bnpx\s+asar\b", re.IGNORECASE), "npx asar CLI invocation"),
 ]
 
+APP_ASAR_REFERENCE_RE = re.compile(r"app\.asar", re.IGNORECASE)
+APP_ASAR_REFERENCE_ERROR = "unauthorized reference to third-party app.asar"
 FORBIDDEN_ASAR_PATTERNS = [
-    (re.compile(r"app\.asar", re.IGNORECASE), "unauthorized reference to third-party app.asar"),
+    (APP_ASAR_REFERENCE_RE, APP_ASAR_REFERENCE_ERROR),
     *FORBIDDEN_EXTERNAL_ASAR_PATTERNS,
 ]
+
+# Exact source excerpts for the existing read-only audit and synthetic fixtures.
+APP_ASAR_REFERENCE_EXCEPTIONS = {
+    "src-tauri/src/client_monitor.rs": (
+        '        let asar = extract_log_error_finding(\n'
+        '            "main.log",\n'
+        r'            "FATAL: ElectronAsarIntegrity mismatch for Resources/app.asar (sk-secret1234567890)\n",'
+        '\n        )\n        .unwrap();',
+    ),
+    "scripts/manage-releases.py": (
+        '                        or "(Claude Desktop RELEASES.json 未附正文日志，请重点核对内嵌 Claude Code CLI 版本与 app.asar 差分)",',
+        '                else "(updater yml 未附 releaseNotes，请通过 verify-macos 三门禁对比 app.asar 变更)",',
+        '    if app_id == "claude":\n'
+        '        app_asar_path = resources / "app.asar"',
+        '            loc_details.append("缺少 app.asar 或 ion-dist.asar")',
+        '                loc_details.append("app.asar 缺少 resources/i18n/en-US.json")',
+        '                loc_details.append(f"app.asar i18n 词条覆盖: {covered}/{total_keys} ({coverage:.1f}%)")',
+        '    elif app_id == "antigravity":\n'
+        '        app_asar_path = resources / "app.asar"',
+        '            loc_details.append("缺少 Contents/Resources/app.asar")',
+        '            loc_details.append(f"app.asar 可解析（共 {len(all_files)} 个文件 / {len(js_files)} 个 JS）")',
+        '    elif app_id == "codex":\n'
+        '        zh_lproj = resources / "zh_CN.lproj"\n'
+        '        app_asar_path = resources / "app.asar"',
+        '            inj_details.append("缺少 Contents/Resources/app.asar")',
+        '                loc_details.append("app.asar 保留 desktop.localeOverride 锚点")',
+        '                loc_details.append("app.asar 缺失 desktop.localeOverride 锚点")',
+        "                inj_details.append(f\"app.asar 缺失注入锚点: {', '.join(missing)}\")",
+        '    elif app_id == "workbuddy":\n'
+        '        loc_details.append("WorkBuddy 国内版原生简体中文")\n'
+        '        asar_path = resources / "app.asar"',
+        '                inj_details.append("app.asar 中未找到 cli/product.json，请人工核对 models.json 兼容")',
+        '            inj_details.append("Resources 下缺少 app.asar")',
+    ),
+    "scripts/test_manage_releases.py": (
+        '''            (res_dir / "app.asar").write_bytes(
+                build_minimal_asar(
+                    {
+                        "resources/i18n/en-US.json": en_i18n,
+                        ".vite/build/index.js": build_js,
+                    }
+                )
+            )''',
+    ),
+}
+
+
+def allowed_app_asar_lines(rel: Path, lines: List[str]) -> set[int]:
+    allowed: set[int] = set()
+    for excerpt in APP_ASAR_REFERENCE_EXCEPTIONS.get(rel.as_posix(), ()):
+        expected = excerpt.splitlines()
+        for start, line in enumerate(lines):
+            end = start + len(expected)
+            if line == expected[0] and lines[start:end] == expected:
+                allowed.update(range(start + 1, end + 1))
+                break  # Each exception authorizes only the first exact occurrence.
+    return allowed
 
 
 def parse_csp(csp_raw: str) -> Dict[str, List[str]]:
@@ -306,6 +401,67 @@ def has_mcp_tool_attr(src_files: Dict[Path, str], tool_id: str) -> bool:
     has_dynamic_attr = any(dynamic_attr_re.search(c) for c in src_files.values())
     has_tool_const = any(tool_str_re.search(c) for c in src_files.values())
     return has_dynamic_attr and has_tool_const
+
+
+def has_extension_testid(src_files: Dict[Path, str], testid: str) -> bool:
+    if has_testid(src_files, testid):
+        return True
+    for prefix in (
+        "open-ext-hub-",
+        "ext-hub-tab-",
+        "ext-prompts-platform-",
+        "ext-skills-subtab-",
+        "ext-plugins-platform-",
+        "ext-plugins-subtab-",
+    ):
+        if testid.startswith(prefix):
+            suffix = re.escape(testid[len(prefix) :])
+            dynamic = re.compile(r"data-testid=\{\s*`" + re.escape(prefix) + r"\$\{[^}]+\}`\s*\}")
+            return any(dynamic.search(content) for content in src_files.values()) and any(
+                re.search(rf'''["']{suffix}["']''', content) for content in src_files.values()
+            )
+    all_source = "\n".join(src_files.values())
+    return (
+        bool(re.search(rf'''testId:\s*["']{re.escape(testid)}["']''', all_source))
+        and (
+            "data-testid={actions.primary.testId}" in all_source
+            or "data-testid={actions.secondary.testId}" in all_source
+        )
+    ) or (
+        bool(re.search(rf'''testId=["']{re.escape(testid)}["']''', all_source))
+        and "data-testid={testId}" in all_source
+    )
+
+
+def extension_contract_checks(repo_root: Path, src_files: Dict[Path, str]) -> List[Tuple[str, bool, str]]:
+    checks: List[Tuple[str, bool, str]] = []
+    overview = src_files.get(repo_root / "src/components/OverviewPanel.tsx", "")
+    mcp_center = src_files.get(repo_root / "src/components/McpCenterPanel.tsx", "")
+    for testid in REQUIRED_EXT_HUB_TESTIDS:
+        checks.append((f"extensions:testid:{testid}", has_extension_testid(src_files, testid), testid))
+    clean_home = (
+        "Tako 模式下自动注入，开关即时生效" in overview
+        and "本项目特有王牌模组" not in overview
+        and "open-multi-sync" not in overview
+        and "grid-cols-2 min-[760px]:grid-cols-4" in overview
+        and "Claude · Codex · Antigravity" in overview
+        and "打开扩展中心" in overview
+    )
+    checks.append(("extensions:home-contract", clean_home, "home subtitle, independent entries and 720px 2-column grid"))
+    checks.append(("extensions:super-mcp-isolated", "MultiPlatformSyncPanel" not in mcp_center and "activeSection" not in mcp_center, "super MCP no longer hosts the generic sync UI"))
+    extension_files = {
+        path: content for path, content in src_files.items()
+        if path == repo_root / "src/components/ExtensionsHubPanel.tsx"
+        or path.parent == repo_root / "src/components/extensions"
+    }
+    hits = [
+        f"{path.relative_to(repo_root)}:{index}"
+        for path, content in extension_files.items()
+        for index, line in enumerate(content.splitlines(), 1)
+        if re.search(r"#[0-9a-fA-F]{3,8}\b|tracking-\[", line)
+    ]
+    checks.append(("extensions:theme-tokens", bool(extension_files) and not hits, "CSS variables only" if not hits else ", ".join(hits)))
+    return checks
 
 
 def _strip_comments_preserve_lines(text: str) -> str:
@@ -582,6 +738,8 @@ def run_checks(repo_root: Path) -> List[Tuple[str, bool, str]]:
             )
         )
 
+    checks.extend(extension_contract_checks(repo_root, src_files))
+
     all_required_assets = REQUIRED_WEBP_ASSETS + [REQUIRED_MP4_ASSET] + REQUIRED_MP3_ASSETS
     for asset_name in all_required_assets:
         ok = asset_name in all_src
@@ -680,10 +838,14 @@ def run_checks(repo_root: Path) -> List[Tuple[str, bool, str]]:
                 if resolved in controlled_asar_paths
                 else FORBIDDEN_ASAR_PATTERNS
             )
-            for idx, line in enumerate(content.splitlines(), start=1):
+            rel = fpath.relative_to(repo_root)
+            lines = content.splitlines()
+            allowed = allowed_app_asar_lines(rel, lines)
+            for idx, line in enumerate(lines, start=1):
                 for pat, desc in patterns:
+                    if pat is APP_ASAR_REFERENCE_RE and idx in allowed:
+                        continue
                     if pat.search(line):
-                        rel = fpath.relative_to(repo_root)
                         asar_hits.append(f"{rel}:{idx} ({desc}): {line.strip()}")
     checks.append(
         (
@@ -851,6 +1013,18 @@ export const McpInlineTheater = () => (
         assert has_mcp_tool_attr(clean_files, tool_id)
     assert find_exposed_mcp_tool_names(clean_files) == []
 
+    extension_files = {
+        Path("src/components/OverviewPanel.tsx"): '''
+const IDS = ["mcp", "skills", "plugins", "prompts"];
+<button data-testid={`open-ext-hub-${id}`} />
+''',
+        Path("src/components/ExtensionsHubPanel.tsx"): '''<button data-testid={actions.primary.testId} />''',
+        Path("src/components/extensions/McpHubView.tsx"): '''primary: { testId: "ext-mcp-add-btn" }''',
+    }
+    assert has_extension_testid(extension_files, "open-ext-hub-prompts")
+    assert has_extension_testid(extension_files, "ext-mcp-add-btn")
+    assert not has_extension_testid(extension_files, "ext-prompts-save-btn")
+
     leaky_files = {
         Path("src/App.tsx"): """
 export const Leaky = () => (
@@ -869,8 +1043,11 @@ export const Leaky = () => (
         root = Path(tmp)
         (root / "public" / "mcp-demo").mkdir(parents=True)
         (root / "src" / "components").mkdir(parents=True)
+        (root / "src" / "components" / "extensions").mkdir()
         (root / "src-tauri" / "src" / "adapters").mkdir(parents=True)
         (root / "scripts").mkdir(parents=True)
+        for rel, excerpts in APP_ASAR_REFERENCE_EXCEPTIONS.items():
+            (root / rel).write_text("\n\n".join(excerpts) + "\n", encoding="utf-8")
 
         (root / CONTROLLED_AGY_I18N_REL).write_text(
             """
@@ -960,6 +1137,18 @@ export const McpInlineTheater = () => (
 """,
             encoding="utf-8",
         )
+        (root / "src/components/OverviewPanel.tsx").write_text(
+            'const subtitle = "Tako 模式下自动注入，开关即时生效";\n'
+            'const scope = "Claude · Codex · Antigravity";\n'
+            'const cta = "打开扩展中心";\n'
+            '<div className="grid-cols-2 min-[760px]:grid-cols-4">\n'
+            + "\n".join(f'<button data-testid="{testid}" />' for testid in REQUIRED_EXT_HUB_TESTIDS)
+            + "\n</div>",
+            encoding="utf-8",
+        )
+        (root / "src/components/ExtensionsHubPanel.tsx").write_text(
+            '<section className="bg-[var(--bg-card)]" />', encoding="utf-8"
+        )
         (root / "src-tauri" / "tauri.conf.json").write_text(
             json.dumps(
                 {
@@ -1006,11 +1195,39 @@ export const McpInlineTheater = () => (
             json.dumps(synth_dict, ensure_ascii=False), encoding="utf-8"
         )
 
-        # Unauthorized app.asar outside antigravity_i18n.rs must fail
-        (root / "src" / "rogue.ts").write_text('const p = "Resources/app.asar";\n', encoding="utf-8")
-        rogue_res = dict((n, ok) for n, ok, _ in run_checks(root))
-        assert not rogue_res["security:no-app-asar-tampering"]
-        (root / "src" / "rogue.ts").unlink()
+        def assert_asar_rejected(rel: str, text: str, reason: str) -> None:
+            path = root / rel
+            original = path.read_text(encoding="utf-8") if path.exists() else None
+            path.write_text(text, encoding="utf-8")
+            _, ok, message = next(c for c in run_checks(root) if c[0] == "security:no-app-asar-tampering")
+            assert not ok and f"{Path(rel)}:" in message and reason in message, message
+            if original is None:
+                path.unlink()
+            else:
+                path.write_text(original, encoding="utf-8")
+
+        assert_asar_rejected("src/rogue.ts", 'const p = "Resources/app.asar";\n', APP_ASAR_REFERENCE_ERROR)
+        for rel, excerpts in APP_ASAR_REFERENCE_EXCEPTIONS.items():
+            approved = (root / rel).read_text(encoding="utf-8")
+            for extra in ('"new app.asar reference"', excerpts[0]):
+                assert_asar_rejected(rel, approved + extra + "\n", APP_ASAR_REFERENCE_ERROR)
+
+        release_rel = "scripts/manage-releases.py"
+        release_excerpt = APP_ASAR_REFERENCE_EXCEPTIONS[release_rel][0]
+        (root / "scripts/nested").mkdir()
+        assert_asar_rejected("scripts/nested/manage-releases.py", release_excerpt, APP_ASAR_REFERENCE_ERROR)
+
+        fixture_rel = "scripts/test_manage_releases.py"
+        fixture = APP_ASAR_REFERENCE_EXCEPTIONS[fixture_rel][0]
+        assert_asar_rejected(fixture_rel, fixture.replace("en_i18n,", "other_data,"), APP_ASAR_REFERENCE_ERROR)
+
+        approved_release = (root / release_rel).read_text(encoding="utf-8")
+        for marker, reason in (
+            ("@electron/asar", "electron/asar package usage"),
+            ("asar.extractAll", "asar unpack/repack call"),
+            ("npx asar", "npx asar CLI invocation"),
+        ):
+            assert_asar_rejected(release_rel, approved_release + f"# {marker}\n", reason)
 
         # npx asar inside antigravity_i18n.rs must still fail
         (root / CONTROLLED_AGY_I18N_REL).write_text('const BAD: &str = "npx asar pack";\n', encoding="utf-8")

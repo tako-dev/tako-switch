@@ -12,6 +12,7 @@ import {
   type AppSnapshot,
   type AppUpdateStatus,
   type DashboardPayload,
+  type ExtensionsSummary,
   type InstallProgressEvent,
   type McpToolsConfig,
   type SavedKeySummary,
@@ -25,7 +26,9 @@ import { CHANGELOG_RELEASES, parseReleaseNotesLines } from "./lib/changelog";
 import { ClientSettingsPanel } from "./components/ClientSettingsPanel";
 import { FeedbackModal } from "./components/FeedbackModal";
 import { GeneralSettingsPanel } from "./components/GeneralSettingsPanel";
-import { McpCenterPanel, type McpCenterSection } from "./components/McpCenterPanel";
+import { ExtensionsHubPanel } from "./components/ExtensionsHubPanel";
+import type { ExtensionNavigationGuard } from "./components/extensions/ExtensionPrimitives";
+import { McpCenterPanel } from "./components/McpCenterPanel";
 import type { McpToolKey } from "./components/McpInlineTheater";
 import { ModelPickerModal } from "./components/ModelPickerModal";
 import { OverviewPanel } from "./components/OverviewPanel";
@@ -34,6 +37,7 @@ import { UiPatchPermissionModal } from "./components/UiPatchPermissionModal";
 import {
   APP_DISPLAY_NAMES,
   formatTimeHHMM,
+  type ExtensionTab,
   type NavRoute,
   type ThemePref,
   type UiDensity,
@@ -136,7 +140,20 @@ export default function App() {
   const [showChangelogModal, setShowChangelogModal] = useState(false);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [mcpInitialTab, setMcpInitialTab] = useState<McpToolKey | null>(null);
-  const [mcpInitialSection, setMcpInitialSection] = useState<McpCenterSection | null>(null);
+  const [extensionTab, setExtensionTab] = useState<ExtensionTab>("mcp");
+  const [extensionsSummary, setExtensionsSummary] = useState<ExtensionsSummary | null>(null);
+  const extensionNavigationGuardRef = useRef<ExtensionNavigationGuard | null>(null);
+  const onExtensionNavigationGuardChange = useCallback((guard: ExtensionNavigationGuard | null) => {
+    extensionNavigationGuardRef.current = guard;
+  }, []);
+  const navigate = useCallback((route: NavRoute) => {
+    const action = () => setActiveRoute(route);
+    if (extensionNavigationGuardRef.current) extensionNavigationGuardRef.current(action); else action();
+  }, []);
+  const changeExtensionTab = useCallback((tab: ExtensionTab) => {
+    const action = () => setExtensionTab(tab);
+    if (extensionNavigationGuardRef.current) extensionNavigationGuardRef.current(action); else action();
+  }, []);
 
   const [themePref, setThemePref] = useState<ThemePref>(loadInitialTheme);
   const [uiDensity, setUiDensity] = useState<UiDensity>(loadInitialDensity);
@@ -187,7 +204,8 @@ export default function App() {
   useEffect(() => {
     if (activeRoute === "overview") return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (
         showKeyModal ||
         showChangelogModal ||
@@ -200,11 +218,11 @@ export default function App() {
       const activeTag = document.activeElement?.tagName?.toLowerCase();
       if (activeTag === "input" || activeTag === "textarea") return;
       if (activeRoute === "mcp") return;
-      setActiveRoute("overview");
+      navigate("overview");
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeRoute, showKeyModal, showChangelogModal, modelModalApp, permissionPrompts.length]);
+  }, [activeRoute, showKeyModal, showChangelogModal, modelModalApp, permissionPrompts.length, navigate]);
 
   const selfUpdateNoteLines = useMemo(
     () => parseReleaseNotesLines(selfUpdate?.notes),
@@ -268,6 +286,40 @@ export default function App() {
       setStatusNote((prev) => (prev === msg ? null : prev));
     }, 3000);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getExtensionsSummary().then((summary) => {
+      if (!cancelled) setExtensionsSummary(summary);
+    }).catch((err: unknown) => {
+      if (!cancelled) setErrorMsg(`读取扩展中心失败：${String(err)}`);
+    });
+    return () => { cancelled = true; };
+  }, [activeRoute]);
+
+  const handleExtensionCountChange = useCallback(
+    (tab: ExtensionTab, count: number, updatableCount?: number) => {
+      const keys: Record<ExtensionTab, keyof ExtensionsSummary> = {
+        mcp: "mcpCount",
+        skills: "skillsCount",
+        plugins: "pluginsCount",
+        prompts: "promptsCount",
+      };
+      setExtensionsSummary((previous) => ({
+        mcpCount: 0,
+        skillsCount: 0,
+        skillsUpdatableCount: 0,
+        pluginsCount: 0,
+        promptsCount: 0,
+        ...previous,
+        [keys[tab]]: count,
+        ...(tab === "skills" && updatableCount !== undefined
+          ? { skillsUpdatableCount: updatableCount }
+          : {}),
+      }));
+    },
+    [],
+  );
 
   const loadDashboard = useCallback(async (refreshAccount: boolean) => {
     try {
@@ -975,6 +1027,7 @@ export default function App() {
       activeRoute !== "overview" &&
       activeRoute !== "general" &&
       activeRoute !== "mcp" &&
+      activeRoute !== "extensions" &&
       hiddenAppsSet.has(activeRoute)
     ) {
       setActiveRoute("overview");
@@ -1388,7 +1441,8 @@ export default function App() {
       !dashboard ||
       activeRoute === "overview" ||
       activeRoute === "general" ||
-      activeRoute === "mcp"
+      activeRoute === "mcp" ||
+      activeRoute === "extensions"
     ) {
       return null;
     }
@@ -1421,7 +1475,7 @@ export default function App() {
         checkingUpdates={checkingUpdates}
         loggingIn={loggingIn}
         switchingKeyId={switchingKeyId}
-        onGoHome={() => setActiveRoute("overview")}
+        onGoHome={() => navigate("overview")}
         onToggleTheme={toggleThemeQuick}
         onRefresh={() => void handleRefresh()}
         onOAuthLogin={() => void handleOAuthLogin()}
@@ -1429,7 +1483,7 @@ export default function App() {
         onSwitchKey={(keyId) => void handleSwitchSavedKey(keyId)}
         onRemoveKey={handleRequestRemoveSavedKey}
         onLogout={() => void handleLogout()}
-        onOpenGeneralSettings={() => setActiveRoute("general")}
+        onOpenGeneralSettings={() => navigate("general")}
         onMinimizeWindow={nativeWindow.minimize}
         onToggleMaximizeWindow={nativeWindow.toggleMaximize}
         onCloseWindow={nativeWindow.close}
@@ -1496,16 +1550,15 @@ export default function App() {
               source: selfUpdate?.source,
               percent: selfUpdateProgress?.percent,
             }}
-            onNavigate={setActiveRoute}
+            onNavigate={navigate}
             onOpenMcpDetail={(tab) => {
-              setMcpInitialSection("builtin");
               setMcpInitialTab(tab ?? null);
               setActiveRoute("mcp");
             }}
-            onOpenMultiSync={(section) => {
-              setMcpInitialTab(null);
-              setMcpInitialSection(section);
-              setActiveRoute("mcp");
+            extensionsSummary={extensionsSummary}
+            onOpenExtensions={(tab) => {
+              if (tab) setExtensionTab(tab);
+              setActiveRoute("extensions");
             }}
             onSetMode={(app, mode) => void handleSetMode(app, mode)}
             onLaunchApp={(id) => void handleLaunchApp(id)}
@@ -1565,7 +1618,7 @@ export default function App() {
             onCancelInstall={(id) => void handleCancelAppInstall(id)}
             onOpenChangelog={() => setShowChangelogModal(true)}
             onOpenFeedback={() => setShowFeedbackModal(true)}
-            onNavigate={setActiveRoute}
+            onNavigate={navigate}
           />
         )}
 
@@ -1576,16 +1629,25 @@ export default function App() {
             loggedIn={Boolean(dashboard?.account.loggedIn)}
             loggingIn={loggingIn}
             initialDrawerTab={mcpInitialTab}
-            initialSection={mcpInitialSection}
             onConsumeInitialTab={() => setMcpInitialTab(null)}
-            onConsumeInitialSection={() => setMcpInitialSection(null)}
-            onNotify={showTransientNote}
             onGoHome={() => setActiveRoute("overview")}
             onToggleCoreTool={(key) => void handleToggleMcpTool(key)}
             onToggleWebPage={handleToggleWebPage}
             onSaveEdgeOneConfig={handleSaveEdgeOneConfig}
             onSelectConsultModel={(model) => void handleSelectConsultModel(model)}
             onRequestLogin={() => void handleOAuthLogin()}
+          />
+        )}
+
+        {activeRoute === "extensions" && (
+          <ExtensionsHubPanel
+            activeTab={extensionTab}
+            onTabChange={changeExtensionTab}
+            summary={extensionsSummary}
+            onCountChange={handleExtensionCountChange}
+            onGoSuperMcp={() => setActiveRoute("mcp")}
+            onNotify={showTransientNote}
+            onNavigationGuardChange={onExtensionNavigationGuardChange}
           />
         )}
 
@@ -1623,6 +1685,7 @@ export default function App() {
         {activeRoute !== "overview" &&
           activeRoute !== "general" &&
           activeRoute !== "mcp" &&
+          activeRoute !== "extensions" &&
           !selectedClientApp && (
             <div className="w-full px-5 py-12 text-center text-[13px] text-[var(--text-muted)]">
               {loading ? "正在读取客户端状态..." : "未找到该客户端配置"}
@@ -1662,7 +1725,7 @@ export default function App() {
         <div className="flex items-center gap-2.5 shrink-0">
           <button
             type="button"
-            onClick={() => setActiveRoute("general")}
+            onClick={() => navigate("general")}
             className="text-[var(--text-muted)] hover:text-[var(--text-primary)] tabular-nums transition cursor-pointer"
           >
             {checkingUpdates

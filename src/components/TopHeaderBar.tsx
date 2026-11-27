@@ -76,6 +76,7 @@ function resolvePrimaryKeyLabel(account?: AccountStatus): string {
 function subpageTitle(route: NavRoute): string {
   if (route === "general") return "通用设置";
   if (route === "mcp") return "MCP 能力中心";
+  if (route === "extensions") return "通用扩展中心";
   if (route === "overview") return "首页";
   return `${APP_DISPLAY_NAMES[route]} 设置`;
 }
@@ -187,7 +188,7 @@ export function TopHeaderBar({
       {/* Left: Brand on Home, Prominent Back + Title on Subpages */}
       <div
         data-tauri-drag-region="deep"
-        className={`flex items-center gap-2.5 min-w-0 shrink-0 max-w-[54%] transition-opacity ${
+        className={`flex items-center gap-2.5 min-w-0 max-w-[54%] transition-opacity ${
           !windowFocused ? "opacity-80" : ""
         }`}
       >
@@ -227,10 +228,10 @@ export function TopHeaderBar({
       <div data-tauri-drag-region className="flex-1 h-full min-w-[16px]" />
 
       {/* Right App Actions + Native Windows Caption Controls */}
-      <div className="flex items-center h-full shrink-0">
+      <div className="flex items-center h-full min-w-0">
         <div
           data-tauri-drag-region="false"
-          className={`flex items-center gap-1.5 shrink-0 ${
+          className={`flex items-center gap-1.5 min-w-0 ${
             isWindows ? "pr-1.5" : ""
           }`}
         >
@@ -247,13 +248,13 @@ export function TopHeaderBar({
                 <span>充值</span>
               </button>
 
-              <div className="relative" ref={popoverRef}>
+              <div className="relative min-w-0" ref={popoverRef}>
                 <button
                   type="button"
                   data-testid="topbar-key-switcher"
                   onClick={() => setAccountOpen((prev) => !prev)}
                   title={`${primaryKeyLabel}${account.activeKeyAlias ? ` [${account.activeKeyAlias}]` : ""}${account.maskedKey ? ` · ${account.maskedKey}` : ""}（点击切换密钥或查看余额）`}
-                  className="h-8 px-2.5 rounded-[9px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] shadow-[var(--shadow-card)] inline-flex items-center gap-1.5 transition cursor-pointer"
+                  className="h-8 w-full px-2.5 rounded-[9px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] shadow-[var(--shadow-card)] inline-flex items-center gap-1.5 transition cursor-pointer"
                 >
                   {account.activeKeyAlias && (
                     <span className="text-[10.5px] font-semibold px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] shrink-0 max-w-[54px] truncate">
@@ -268,7 +269,7 @@ export function TopHeaderBar({
                     {primaryKeyLabel}
                   </span>
                   {account.planName && (
-                    <span className="hidden md:inline text-[11px] font-medium text-[var(--accent)] shrink-0">
+                    <span className="hidden min-[900px]:inline max-w-[120px] truncate text-[11px] font-medium text-[var(--accent)]">
                       {account.planName}
                     </span>
                   )}
@@ -623,7 +624,7 @@ export function TopHeaderBar({
             disabled={refreshing || checkingUpdates}
             title="刷新状态与版本"
             aria-label="刷新状态与版本"
-            className="h-8 w-8 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center transition cursor-pointer disabled:opacity-50"
+            className="h-8 w-8 shrink-0 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center transition cursor-pointer disabled:opacity-50"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${
@@ -637,7 +638,7 @@ export function TopHeaderBar({
             onClick={onToggleTheme}
             title={isDark ? "切换浅色模式" : "切换深色模式"}
             aria-label={isDark ? "切换浅色模式" : "切换深色模式"}
-            className="h-8 w-8 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center transition cursor-pointer"
+            className="h-8 w-8 shrink-0 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center transition cursor-pointer"
           >
             {isDark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
           </button>
@@ -650,7 +651,7 @@ export function TopHeaderBar({
             }
             title={activeRoute === "general" ? "返回首页" : "通用设置与更新"}
             aria-label="通用设置与更新"
-            className={`relative h-8 w-8 rounded-[8px] border inline-flex items-center justify-center transition cursor-pointer ${
+            className={`relative h-8 w-8 shrink-0 rounded-[8px] border inline-flex items-center justify-center transition cursor-pointer ${
               activeRoute === "general"
                 ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
                 : "border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
