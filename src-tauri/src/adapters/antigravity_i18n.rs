@@ -8,7 +8,8 @@ pub use crate::adapters::asar_patch::{
     UiPatchPermissionPrompt, UI_PATCH_BLOCK_PREFIX,
 };
 use crate::adapters::i18n_packs::{
-    effective_ui_patch_version, load_i18n_overlay_dict, merge_json_dict_with_overlay,
+    effective_ui_patch_version, is_ui_patch_version_current, load_i18n_overlay_dict,
+    merge_json_dict_with_overlay,
 };
 use crate::adapters::{AppId, DesktopAppAdapter};
 use crate::config::{write_atomic, AppPaths};
@@ -22,7 +23,9 @@ use std::path::{Path, PathBuf};
 
 pub const PATCH_MARKER_FILE: &str = "__tako_i18n_patch.json";
 pub const PATCH_GUARD_COMMENT: &str = "/* __TAKO_AGY_ZH_PATCH_V1__ */";
-pub const CURRENT_UI_PATCH_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Bump this only when Antigravity's patch engine / injected script logic changes
+/// independently of `antigravity_zh_dict.json` (dictionary edits auto-bump via content hash).
+pub const ANTIGRAVITY_UI_PATCH_ENGINE_REV: u32 = 1;
 pub const ANTIGRAVITY_ZH_DICT_JSON: &str = include_str!("antigravity_zh_dict.json");
 const ASAR_INTEGRITY_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
@@ -1958,7 +1961,11 @@ pub fn inspect_antigravity_ui_patch(paths: &AppPaths) -> UiPatchInfo {
             .unwrap_or("");
         let backup_path = ui_patch_backup_dir(paths).join("app.asar.orig");
         let has_valid_backup = quick_check_clean_backup_asar(&backup_path, expected_sha);
-        let update_available = patch_version.as_deref() != Some(target_patch_version.as_str());
+        let update_available = !is_ui_patch_version_current(
+            AppId::Antigravity,
+            patch_version.as_deref(),
+            &target_patch_version,
+        );
         let note = if update_available {
             format!(
                 "检测到新版简体中文词典（v{target_patch_version}），Antigravity 关闭时将自动同步，也可立即一键更新"
@@ -2055,8 +2062,11 @@ pub fn patch_antigravity_ui_for_paths(paths: &AppPaths) -> Result<UiPatchInfo, S
                 .map(|m| m.original_asar_sha256)
                 .unwrap_or_else(|| marker.original_asar_sha256.clone());
 
-            if marker.patch_version == target_patch_version
-                && verify_clean_backup_asar(paths, &expected_orig_sha).is_ok()
+            if is_ui_patch_version_current(
+                AppId::Antigravity,
+                Some(&marker.patch_version),
+                &target_patch_version,
+            ) && verify_clean_backup_asar(paths, &expected_orig_sha).is_ok()
             {
                 return Ok(inspect_antigravity_ui_patch(paths));
             }
@@ -2484,7 +2494,7 @@ addItemToSubmenu(menu, 'Help', { label: 'Check for Updates...', click: (item) =>
         assert_eq!(patched_info.status, UiPatchStatus::Patched);
         assert_eq!(
             patched_info.patch_version.as_deref(),
-            Some(CURRENT_UI_PATCH_VERSION)
+            Some(crate::adapters::builtin_ui_patch_version(AppId::Antigravity))
         );
         assert!(patched_info.has_valid_backup);
 

@@ -1,12 +1,28 @@
-use crate::adapters::antigravity_i18n::{sha256_hex, CURRENT_UI_PATCH_VERSION};
+use crate::adapters::antigravity_i18n::{
+    sha256_hex, ANTIGRAVITY_UI_PATCH_ENGINE_REV, ANTIGRAVITY_ZH_DICT_JSON,
+};
+use crate::adapters::claude_i18n::{CLAUDE_UI_PATCH_ENGINE_REV, CLAUDE_ZH_DICT_RAW};
 use crate::adapters::AppId;
 use crate::config::{write_atomic, AppPaths};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// Frozen e1 content fingerprints that shipped identically in legacy App-versioned patches.
+// If either built-in dict or engine revision changes in the future, `builtin_ui_patch_version`
+// automatically diverges from these constants and legacy installs will be prompted to update.
+const LEGACY_CLAUDE_E1_BASELINE: &str = "1.ec5921fe";
+const LEGACY_ANTIGRAVITY_E1_BASELINE: &str = "1.bac77974";
+
+static CLAUDE_BUILTIN_PATCH_VERSION: OnceLock<String> = OnceLock::new();
+static ANTIGRAVITY_BUILTIN_PATCH_VERSION: OnceLock<String> = OnceLock::new();
 
 pub const DEFAULT_I18N_MANIFEST_URL: &str =
     "https://dsh-tako-dl.oss-cn-shanghai.aliyuncs.com/tako-switch/i18n/manifest.json";
@@ -66,10 +82,92 @@ fn app_meets_min_version(min_app_version: Option<&str>) -> bool {
     let Some(min_ver) = min_app_version.map(str::trim).filter(|s| !s.is_empty()) else {
         return true;
     };
-    match (parse_semver3(CURRENT_UI_PATCH_VERSION), parse_semver3(min_ver)) {
+    match (parse_semver3(APP_VERSION), parse_semver3(min_ver)) {
         (Some(cur), Some(req)) => cur >= req,
         _ => true,
     }
+}
+
+fn normalized_sha256_prefix8(raw: &str) -> String {
+    let mut hasher = Sha256::new();
+    for chunk in raw.as_bytes().split(|&b| b == b'\r') {
+        hasher.update(chunk);
+    }
+    let digest = hasher.finalize();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
+}
+
+/// Returns the built-in UI patch version for `app_id`, decoupled from Tako Switch's
+/// `CARGO_PKG_VERSION`. It changes only when that app's patch engine revision or
+/// embedded Chinese dictionary content actually changes.
+pub fn builtin_ui_patch_version(app_id: AppId) -> &'static str {
+    match app_id {
+        AppId::Claude => CLAUDE_BUILTIN_PATCH_VERSION
+            .get_or_init(|| {
+                format!(
+                    "{CLAUDE_UI_PATCH_ENGINE_REV}.{}",
+                    normalized_sha256_prefix8(CLAUDE_ZH_DICT_RAW)
+                )
+            })
+            .as_str(),
+        AppId::Antigravity => ANTIGRAVITY_BUILTIN_PATCH_VERSION
+            .get_or_init(|| {
+                format!(
+                    "{ANTIGRAVITY_UI_PATCH_ENGINE_REV}.{}",
+                    normalized_sha256_prefix8(ANTIGRAVITY_ZH_DICT_JSON)
+                )
+            })
+            .as_str(),
+        _ => "0",
+    }
+}
+
+fn split_pack_suffix(version: &str) -> (&str, Option<&str>) {
+    match version.split_once("+pack.") {
+        Some((base, pack)) => (base.trim(), Some(pack.trim())),
+        None => (version.trim(), None),
+    }
+}
+
+fn is_legacy_equivalent_base(app_id: AppId, installed_base: &str, target_base: &str) -> bool {
+    let Some((major, minor, patch)) = parse_semver3(installed_base) else {
+        return false;
+    };
+    if major != 2 || minor != 3 {
+        return false;
+    }
+    match app_id {
+        // Claude's built-in dict + patch engine has been identical from v2.3.7 through v2.3.10.
+        AppId::Claude => target_base == LEGACY_CLAUDE_E1_BASELINE && (7..=10).contains(&patch),
+        // Antigravity's built-in dict + patch engine has been identical from v2.3.5 through v2.3.10.
+        AppId::Antigravity => {
+            target_base == LEGACY_ANTIGRAVITY_E1_BASELINE && (5..=10).contains(&patch)
+        }
+        _ => false,
+    }
+}
+
+/// Checks whether an installed UI patch marker version already matches `target`.
+/// Accepts exact match, plus legacy App-versioned patches (`2.3.5..=2.3.10` for Antigravity,
+/// `2.3.7..=2.3.10` for Claude) ONLY while the current built-in fingerprint still matches the
+/// frozen e1 baseline and the cloud pack revision matches.
+pub fn is_ui_patch_version_current(app_id: AppId, installed: Option<&str>, target: &str) -> bool {
+    let Some(installed) = installed.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let target = target.trim();
+    if installed == target {
+        return true;
+    }
+    let (inst_base, inst_pack) = split_pack_suffix(installed);
+    let (tgt_base, tgt_pack) = split_pack_suffix(target);
+    if inst_pack != tgt_pack {
+        return false;
+    }
+    is_legacy_equivalent_base(app_id, inst_base, tgt_base)
 }
 
 fn read_verified_local_pack(
@@ -98,10 +196,11 @@ fn read_verified_local_pack(
 /// Returns the target UI patch version string for `app_id`, incorporating any verified
 /// local cloud-synced i18n overlay pack revision.
 pub fn effective_ui_patch_version(paths: &AppPaths, app_id: AppId) -> String {
+    let base = builtin_ui_patch_version(app_id);
     if let Some((meta, _)) = read_verified_local_pack(paths, app_id) {
-        format!("{CURRENT_UI_PATCH_VERSION}+pack.{}", meta.revision.trim())
+        format!("{base}+pack.{}", meta.revision.trim())
     } else {
-        CURRENT_UI_PATCH_VERSION.to_string()
+        base.to_string()
     }
 }
 
@@ -229,7 +328,7 @@ pub async fn refresh_remote_i18n_packs(paths: &AppPaths) -> Vec<AppId> {
     let Ok(client) = Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(12))
-        .user_agent(format!("TakoSwitch/{}", CURRENT_UI_PATCH_VERSION))
+        .user_agent(format!("TakoSwitch/{APP_VERSION}"))
         .build()
     else {
         return Vec::new();
@@ -300,9 +399,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = AppPaths::for_test(tmp.path());
 
+        let claude_base = builtin_ui_patch_version(AppId::Claude);
         assert_eq!(
             effective_ui_patch_version(&paths, AppId::Claude),
-            CURRENT_UI_PATCH_VERSION
+            claude_base
         );
         assert!(load_i18n_overlay_dict(&paths, AppId::Claude).is_none());
 
@@ -333,7 +433,7 @@ mod tests {
         .unwrap());
         assert_eq!(
             effective_ui_patch_version(&paths, AppId::Claude),
-            format!("{CURRENT_UI_PATCH_VERSION}+pack.20261123.1")
+            format!("{claude_base}+pack.20261123.1")
         );
         let loaded = load_i18n_overlay_dict(&paths, AppId::Claude).unwrap();
         assert_eq!(loaded.get("Hello World").map(String::as_str), Some("你好世界"));
@@ -353,9 +453,49 @@ mod tests {
         fs::write(i18n_pack_dir(&paths, AppId::Claude).join("dict.json"), b"{}").unwrap();
         assert_eq!(
             effective_ui_patch_version(&paths, AppId::Claude),
-            CURRENT_UI_PATCH_VERSION
+            claude_base
         );
         assert!(load_i18n_overlay_dict(&paths, AppId::Claude).is_none());
+    }
+
+    #[test]
+    fn ui_patch_version_is_decoupled_from_app_version_with_legacy_compat() {
+        let claude_ver = builtin_ui_patch_version(AppId::Claude);
+        let agy_ver = builtin_ui_patch_version(AppId::Antigravity);
+
+        assert_ne!(claude_ver, APP_VERSION);
+        assert_ne!(agy_ver, APP_VERSION);
+        assert_ne!(claude_ver, agy_ver);
+        assert_eq!(claude_ver, LEGACY_CLAUDE_E1_BASELINE);
+        assert_eq!(agy_ver, LEGACY_ANTIGRAVITY_E1_BASELINE);
+
+        // CRLF normalization must yield identical fingerprint across OS line endings
+        assert_eq!(
+            normalized_sha256_prefix8("{\n  \"a\": \"b\"\n}"),
+            normalized_sha256_prefix8("{\r\n  \"a\": \"b\"\r\n}")
+        );
+
+        // Legacy installs that already shipped the identical e1 dict/engine need no repatch
+        assert!(is_ui_patch_version_current(AppId::Claude, Some("2.3.7"), claude_ver));
+        assert!(is_ui_patch_version_current(AppId::Claude, Some("2.3.10"), claude_ver));
+        assert!(!is_ui_patch_version_current(AppId::Claude, Some("2.3.6"), claude_ver));
+
+        assert!(is_ui_patch_version_current(AppId::Antigravity, Some("2.3.5"), agy_ver));
+        assert!(is_ui_patch_version_current(AppId::Antigravity, Some("2.3.10"), agy_ver));
+        assert!(!is_ui_patch_version_current(AppId::Antigravity, Some("2.3.4"), agy_ver));
+
+        // Cloud pack update must invalidate legacy install without matching pack suffix
+        let claude_with_pack = format!("{claude_ver}+pack.20261128.1");
+        assert!(!is_ui_patch_version_current(AppId::Claude, Some("2.3.10"), &claude_with_pack));
+        assert!(is_ui_patch_version_current(
+            AppId::Claude,
+            Some("2.3.10+pack.20261128.1"),
+            &claude_with_pack
+        ));
+
+        // Any future dict hash or engine rev bump must invalidate both legacy and old hashes
+        assert!(!is_ui_patch_version_current(AppId::Claude, Some("2.3.10"), "1.deadbeef"));
+        assert!(!is_ui_patch_version_current(AppId::Claude, Some(claude_ver), "2.ec5921fe"));
     }
 
     #[test]

@@ -2,7 +2,9 @@ use crate::adapters::antigravity_i18n::{
     quick_check_clean_backup_asar, sha256_hex, AsarArchive, AsarHeaderIndex, UiPatchInfo,
     UiPatchStatus, PATCH_MARKER_FILE,
 };
-use crate::adapters::i18n_packs::{effective_ui_patch_version, load_i18n_overlay_dict};
+use crate::adapters::i18n_packs::{
+    effective_ui_patch_version, is_ui_patch_version_current, load_i18n_overlay_dict,
+};
 #[cfg(target_os = "macos")]
 use crate::adapters::antigravity_i18n::resign_macos_outer_bundle_for;
 #[cfg(target_os = "macos")]
@@ -36,7 +38,10 @@ const CLAUDE_UI_POLISH_STYLE_TAG: &str = r#"<style id="tako-claude-code-landing-
 @media (min-height:680px){.epitaxy-chat-panel:has([data-testid="epitaxy-start-card"]) .epitaxy-prompt{margin-bottom:clamp(1.5rem,11vh,6.25rem);transition:margin-bottom 180ms ease}}
 </style>"#;
 
-const CLAUDE_ZH_DICT_RAW: &str = include_str!("claude_zh_dict.json");
+/// Bump this only when Claude Desktop's patch engine / injected script / polish CSS changes
+/// independently of `claude_zh_dict.json` (dictionary edits auto-bump via content hash).
+pub const CLAUDE_UI_PATCH_ENGINE_REV: u32 = 1;
+pub const CLAUDE_ZH_DICT_RAW: &str = include_str!("claude_zh_dict.json");
 
 const KNOWN_DYNAMIC_EN: &[(&str, &str)] = &[
     ("0gtp5o1nEE", "Complex, detailed work"),
@@ -1914,7 +1919,11 @@ pub fn inspect_claude_ui_patch(paths: &AppPaths) -> UiPatchInfo {
                     &backup_dir.join("ion-dist.asar.orig"),
                     expected_ion_sha,
                 );
-        let update_available = patch_version.as_deref() != Some(target_patch_version.as_str());
+        let update_available = !is_ui_patch_version_current(
+            AppId::Claude,
+            patch_version.as_deref(),
+            &target_patch_version,
+        );
         let note = if update_available {
             format!(
                 "检测到新版简体中文词典（v{target_patch_version}），Claude 关闭时将自动同步，也可立即一键更新"
@@ -2022,12 +2031,11 @@ pub fn patch_claude_ui_for_paths(paths: &AppPaths) -> Result<UiPatchInfo, String
             .map(|m| m.original_ion_asar_sha256.as_str())
             .or_else(|| ion_marker.as_ref().map(|m| m.original_asar_sha256.as_str()))
             .unwrap_or("");
-        if app_marker
-            .as_ref()
-            .is_some_and(|m| m.patch_version == target_patch_version)
-            && ion_marker
-                .as_ref()
-                .is_some_and(|m| m.patch_version == target_patch_version)
+        if app_marker.as_ref().is_some_and(|m| {
+            is_ui_patch_version_current(AppId::Claude, Some(&m.patch_version), &target_patch_version)
+        }) && ion_marker.as_ref().is_some_and(|m| {
+            is_ui_patch_version_current(AppId::Claude, Some(&m.patch_version), &target_patch_version)
+        })
             && verify_clean_backup_file(paths, "app.asar.orig", expected_app_sha).is_ok()
             && verify_clean_backup_file(paths, "ion-dist.asar.orig", expected_ion_sha).is_ok()
         {
@@ -2532,7 +2540,7 @@ pub fn restore_claude_ui_for_paths(paths: &AppPaths) -> Result<UiPatchInfo, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::antigravity_i18n::CURRENT_UI_PATCH_VERSION;
+    use crate::adapters::builtin_ui_patch_version;
     use crate::adapters::asar_patch::{parse_ui_patch_block_error, UiPatchBlockKind};
     use tempfile::TempDir;
 
@@ -2659,7 +2667,10 @@ mod tests {
         let patched = patch_claude_ui_for_paths(&paths).unwrap();
         assert_eq!(patched.status, UiPatchStatus::Patched);
         assert!(patched.has_valid_backup);
-        assert_eq!(patched.patch_version.as_deref(), Some(CURRENT_UI_PATCH_VERSION));
+        assert_eq!(
+            patched.patch_version.as_deref(),
+            Some(builtin_ui_patch_version(AppId::Claude))
+        );
 
         // Verify app.asar mutations
         let patched_app_bytes = fs::read(&app_asar_path).unwrap();
@@ -2775,7 +2786,10 @@ mod tests {
         let first = patch_claude_ui_for_paths(&paths).unwrap();
         assert_eq!(first.status, UiPatchStatus::Patched);
         assert!(!first.update_available);
-        assert_eq!(first.patch_version.as_deref(), Some(CURRENT_UI_PATCH_VERSION));
+        assert_eq!(
+            first.patch_version.as_deref(),
+            Some(builtin_ui_patch_version(AppId::Claude))
+        );
 
         // 2. Installing a newer cloud dictionary overlay marks update_available = true
         let overlay = r#"{"New chat":"全新会话（云端词典）"}"#.as_bytes();
@@ -2803,7 +2817,7 @@ mod tests {
         assert!(!after_sync.update_available);
         assert_eq!(
             after_sync.patch_version.as_deref(),
-            Some(format!("{CURRENT_UI_PATCH_VERSION}+pack.20261123.9").as_str())
+            Some(format!("{}+pack.20261123.9", builtin_ui_patch_version(AppId::Claude)).as_str())
         );
 
         let ion_arc = AsarArchive::parse(&fs::read(&ion_asar_path).unwrap()).unwrap();

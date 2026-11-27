@@ -24,8 +24,9 @@ pub use claude_i18n::{
     validate_icu_compatibility, CLAUDE_PATCH_GUARD_COMMENT,
 };
 pub use i18n_packs::{
-    effective_ui_patch_version, install_i18n_pack_bytes, load_i18n_overlay_dict,
-    merge_json_dict_with_overlay, refresh_remote_i18n_packs,
+    builtin_ui_patch_version, effective_ui_patch_version, install_i18n_pack_bytes,
+    is_ui_patch_version_current, load_i18n_overlay_dict, merge_json_dict_with_overlay,
+    refresh_remote_i18n_packs,
 };
 
 use crate::config::{write_atomic, AppPaths};
