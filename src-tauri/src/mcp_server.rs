@@ -2008,6 +2008,7 @@ async fn exec_deploy_website(paths: &AppPaths, args: Value) -> Result<String, St
             project_name,
             environment,
             area,
+            source: Some("mcp".to_string()),
         },
     )
     .await?;

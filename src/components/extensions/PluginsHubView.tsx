@@ -31,6 +31,7 @@ import {
 import { ToggleSwitch } from "../UiPrimitives";
 import {
   EXT_BUTTON,
+  EXT_DANGER_BUTTON,
   EXT_INPUT,
   EXT_PLATFORMS,
   EXT_PRIMARY_BUTTON,
@@ -239,12 +240,13 @@ export function PluginsHubView({
       className="min-w-0 flex flex-col gap-[var(--density-list-gap)]"
       aria-busy={loading || busy !== null}
     >
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b border-[var(--border)] pb-3">
+      {/* Layer 1: Primary Platform Switcher + Adjacent CLI Status */}
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div
             role="tablist"
             aria-label="插件平台"
-            className="inline-flex min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg-pill)] p-0.5"
+            className="inline-flex min-w-0 rounded-[8px] border border-[var(--border)] bg-[var(--bg-pill)] p-0.5"
           >
             {EXT_PLATFORMS.map((item) => (
               <button
@@ -255,7 +257,7 @@ export function PluginsHubView({
                 data-testid={`ext-plugins-platform-${item.id}`}
                 disabled={busy !== null}
                 onClick={() => setPlatform(item.id)}
-                className={`h-[var(--density-ctrl-sm-h)] shrink-0 whitespace-nowrap rounded-md px-2.5 text-[12px] cursor-pointer disabled:opacity-45 ${platform === item.id ? "bg-[var(--bg-card)] font-semibold text-[var(--text-primary)] shadow-[var(--shadow-segment)]" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"}`}
+                className={`h-[var(--density-ctrl-sm-h)] shrink-0 whitespace-nowrap rounded-[6px] px-2.5 text-[12px] cursor-pointer disabled:opacity-45 transition ${platform === item.id ? "bg-[var(--bg-card)] font-semibold text-[var(--text-primary)] shadow-[var(--shadow-segment)]" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"}`}
               >
                 {item.label}
               </button>
@@ -264,7 +266,13 @@ export function PluginsHubView({
           <span
             data-testid="ext-plugins-cli-status"
             title={snapshot?.cliPath ?? undefined}
-            className={`inline-flex h-[var(--density-pill-h)] shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 text-[10.5px] ${snapshot?.cliAvailable ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--bg-subtle)] text-[var(--text-muted)]"}`}
+            className={`inline-flex h-[var(--density-pill-h)] shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2.5 text-[11px] font-medium ${
+              snapshot?.cliAvailable
+                ? "bg-[var(--success-soft)] text-[var(--success)]"
+                : loading
+                  ? "bg-[var(--bg-subtle)] text-[var(--text-secondary)]"
+                  : "bg-[var(--warning-soft)] text-[var(--warning)]"
+            }`}
           >
             {snapshot?.cliAvailable && <Check className="h-3 w-3" />}
             {snapshot?.cliAvailable
@@ -276,10 +284,14 @@ export function PluginsHubView({
                 : "未检出 CLI"}
           </span>
         </div>
+      </div>
+
+      {/* Layer 2: Lightweight Underline Subtabs (distinct visual weight from Platform Segment) */}
+      <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[var(--border)]">
         <div
           role="tablist"
           aria-label="插件列表"
-          className="inline-flex shrink-0 gap-0.5 rounded-lg bg-[var(--bg-pill)] p-0.5"
+          className="inline-flex shrink-0 items-center gap-4"
         >
           {(
             [
@@ -298,13 +310,25 @@ export function PluginsHubView({
                 busy !== null ||
                 (item.id === "marketplaces" && platform === "antigravity")
               }
+              title={
+                item.id === "marketplaces" && platform === "antigravity"
+                  ? "Antigravity 暂不支持市场源管理"
+                  : undefined
+              }
               onClick={() => setTab(item.id)}
-              className={`h-[var(--density-ctrl-sm-h)] shrink-0 whitespace-nowrap rounded-md px-2.5 text-[12px] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${tab === item.id ? "bg-[var(--bg-card)] text-[var(--text-primary)] font-medium shadow-[var(--shadow-segment)]" : "text-[var(--text-secondary)]"}`}
+              className={`relative -mb-px pb-2 pt-0.5 shrink-0 whitespace-nowrap text-[12.5px] border-b-2 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                tab === item.id
+                  ? "border-[var(--accent)] font-semibold text-[var(--text-primary)]"
+                  : "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              }`}
             >
               {item.label}
             </button>
           ))}
         </div>
+        <span className="mb-1.5 shrink-0 whitespace-nowrap text-[11px] tabular-nums text-[var(--text-muted)]">
+          {selectedCount} {tab === "marketplaces" ? "个市场" : "个插件"}
+        </span>
       </div>
 
       <div className="flex min-w-0 items-center gap-2">
@@ -393,17 +417,29 @@ export function PluginsHubView({
         </div>
       )}
       {!loading && snapshot?.cliAvailable === false && (
-        <div
-          data-testid="ext-plugins-empty-unsupported"
-          className="flex min-h-[210px] flex-col items-center justify-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-5 text-center"
-        >
+        <div className="tako-card-surface flex min-h-[210px] flex-col items-center justify-center gap-3 border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)] px-5 text-center">
           <Puzzle
             className="h-7 w-7 text-[var(--text-muted)]"
             strokeWidth={1.5}
           />
-          <p className="max-w-full text-[13px] text-[var(--text-secondary)] break-words">
+          <p
+            data-testid="ext-plugins-empty-unsupported"
+            className="max-w-full text-[13px] font-medium text-[var(--text-primary)] break-words"
+          >
             未检测到对应 CLI，当前客户端暂不支持该功能
           </p>
+          <p className="max-w-[360px] text-[11.5px] text-[var(--text-muted)] leading-relaxed">
+            已自动探测 {EXT_PLATFORMS.find((item) => item.id === platform)?.label} 内置 CLI、用户安装目录及系统 PATH。安装对应客户端 CLI 后可点击重新探测。
+          </p>
+          <button
+            type="button"
+            disabled={loading || busy !== null}
+            onClick={() => void load(true)}
+            className={EXT_BUTTON}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>刷新探测</span>
+          </button>
         </div>
       )}
       {!loading && snapshot?.cliAvailable && tab !== "marketplaces" && (
@@ -412,7 +448,7 @@ export function PluginsHubView({
             <article
               key={`${entry.id}:${entry.scope ?? "user"}`}
               data-testid="ext-plugin-card"
-              className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-[var(--density-card-px)] py-[var(--density-card-py)] flex flex-col gap-2"
+              className="tako-card-surface min-w-0 border border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--border-strong)] shadow-[var(--shadow-card)] px-[var(--density-card-px)] py-[var(--density-card-py)] flex flex-col gap-2 transition-colors"
             >
               <div className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
@@ -698,7 +734,7 @@ export function PluginsHubView({
                   closeRemoval,
                 )
               }
-              className={`${EXT_BUTTON} text-[var(--danger)]`}
+              className={EXT_DANGER_BUTTON}
             >
               {busy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />

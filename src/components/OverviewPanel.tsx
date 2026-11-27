@@ -1,25 +1,18 @@
 import {
   ArrowUpCircle,
-  Brain,
   CheckCircle2,
-  ChevronRight,
   Download,
   ExternalLink,
   FileText,
-  Film,
   Globe,
   Globe2,
-  Headphones,
-  Image as ImageIcon,
   LayoutGrid,
   Loader2,
   Power,
-  Plug,
-  Puzzle,
+  Rocket,
   RotateCw,
   SlidersHorizontal,
   Sparkles,
-  Zap,
 } from "lucide-react";
 import type {
   AppId,
@@ -27,6 +20,8 @@ import type {
   AppSnapshot,
   AppUpdateStatus,
   DashboardPayload,
+  EdgeOneSiteRecord,
+  EdgeOneStatus,
   ExtensionsSummary,
   InstallProgressEvent,
   UiPatchProgressEvent,
@@ -65,6 +60,9 @@ interface OverviewPanelProps {
   selfUpdateSummary: SelfUpdateSummary;
   onNavigate: (route: NavRoute) => void;
   onOpenMcpDetail: (tab?: McpToolKey) => void;
+  edgeOneStatus?: EdgeOneStatus | null;
+  edgeOneSites?: EdgeOneSiteRecord[];
+  onOpenWebPage: (autoDeploy?: boolean) => void;
   extensionsSummary: ExtensionsSummary | null;
   onOpenExtensions: (tab?: ExtensionTab) => void;
   onSetMode: (app: AppSnapshot, mode: AppMode) => void;
@@ -84,67 +82,6 @@ interface OverviewPanelProps {
 const MODE_OPTIONS: { id: AppMode; label: string }[] = [
   { id: "official", label: "官方" },
   { id: "tako", label: "Tako" },
-];
-
-type HomeMcpItem =
-  | {
-      kind: "core";
-      key: McpToolKey;
-      label: string;
-      subtitle: string;
-      Icon: typeof ImageIcon;
-    }
-  | {
-      kind: "webpage";
-      key: "webPage";
-      label: string;
-      subtitle: string;
-      Icon: typeof Globe2;
-    };
-
-const HOME_MCP_ITEMS: HomeMcpItem[] = [
-  {
-    kind: "core",
-    key: "image",
-    label: "图像生成",
-    subtitle: "文生图 / 改图 / 多图融合",
-    Icon: ImageIcon,
-  },
-  {
-    kind: "core",
-    key: "video",
-    label: "视频生成",
-    subtitle: "首尾帧控制 · 动态成片",
-    Icon: Film,
-  },
-  {
-    kind: "core",
-    key: "audio",
-    label: "声音生成",
-    subtitle: "多角色多情绪自然语音",
-    Icon: Headphones,
-  },
-  {
-    kind: "core",
-    key: "search",
-    label: "联网搜索",
-    subtitle: "实时信源检索与溯源",
-    Icon: Globe,
-  },
-  {
-    kind: "core",
-    key: "consult",
-    label: "多模型会诊",
-    subtitle: "第二外脑交叉审阅",
-    Icon: Brain,
-  },
-  {
-    kind: "webpage",
-    key: "webPage",
-    label: "网站上线",
-    subtitle: "腾讯云 EdgeOne 一键发布",
-    Icon: Globe2,
-  },
 ];
 
 function briefClientSummary(
@@ -194,12 +131,15 @@ export function OverviewPanel({
   cancellingApp,
   togglingChineseUi,
   uiPatchProgress,
-  savingMcp,
+  savingMcp: _savingMcp,
   mcpEnabledCount,
   mcpTotalCount,
   selfUpdateSummary,
   onNavigate,
   onOpenMcpDetail,
+  edgeOneStatus = null,
+  edgeOneSites = [],
+  onOpenWebPage,
   extensionsSummary,
   onOpenExtensions,
   onSetMode,
@@ -209,8 +149,8 @@ export function OverviewPanel({
   onInstallOrUpgrade,
   onCancelInstall,
   onToggleMainChineseUi,
-  onToggleCoreMcp,
-  onToggleWebPageMcp,
+  onToggleCoreMcp: _onToggleCoreMcp,
+  onToggleWebPageMcp: _onToggleWebPageMcp,
   onOpenModelSquare,
   onInstallSelfUpdate,
   onOpenChangelog,
@@ -699,232 +639,192 @@ export function OverviewPanel({
         )}
       </section>
 
-      {/* Section 2: Tako Super MCP Compact Card + Secondary Page Entry */}
-      <section className="tako-mcp-section border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)] min-w-0">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-[var(--density-list-gap)]">
-          <div className="flex items-center gap-2 min-w-0">
-            <Sparkles className="h-4 w-4 text-[var(--accent)] shrink-0" />
-            <span className="text-[13px] font-semibold text-[var(--text-primary)] shrink-0">
-              Tako 超级 MCP
-            </span>
-            <span className="hidden sm:inline text-[11.5px] text-[var(--text-muted)] truncate">
-              Tako 模式下自动注入，开关即时生效
-            </span>
-          </div>
+      {/* Section 2: Three Equal-Tier Capability Entry Cards (Desktop Clients above untouched) */}
+      {(() => {
+        const safeSites = Array.isArray(edgeOneSites) ? edgeOneSites : [];
+        const siteCount = safeSites.length;
+        const previewCount = safeSites.filter((s) => s.environment === "preview").length;
+        const wpAuthed = Boolean(edgeOneStatus?.authenticated);
+        const wpStatusText = wpAuthed
+          ? "EdgeOne · 已就绪"
+          : edgeOneStatus?.error
+            ? "EdgeOne · 需处理"
+            : "EdgeOne · 待登录";
+        const extMcpCount = extensionsSummary?.mcpCount ?? 0;
+        const extSkillsCount = extensionsSummary?.skillsCount ?? 0;
+        const extSkillsUpdatable = extensionsSummary?.skillsUpdatableCount ?? 0;
+        const extPluginsCount = extensionsSummary?.pluginsCount ?? 0;
+        const extPromptsCount = extensionsSummary?.promptsCount ?? 0;
+        const extTotalCount =
+          extMcpCount + extSkillsCount + extPluginsCount + extPromptsCount;
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className="tabular-nums text-[11.5px] font-medium text-[var(--text-secondary)]">
-              {mcpEnabledCount}/{mcpTotalCount} 已开启
-            </span>
-            <button
-              type="button"
-              data-testid="open-mcp-center"
-              onClick={() => onOpenMcpDetail()}
-              className="h-7 px-2.5 rounded-full border border-[var(--accent-border)] bg-[var(--accent-soft)] hover:bg-[var(--accent-border)] text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-1 transition cursor-pointer"
-            >
-              <span>配置与演示</span>
-              <ChevronRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-3 tako-list-stack">
-          {HOME_MCP_ITEMS.map((item) => {
-            const Icon = item.Icon;
-            const enabled =
-              item.kind === "webpage"
-                ? Boolean(mcp?.webPage)
-                : Boolean(mcp?.[item.key]);
-            const interactive = Boolean(mcp) && !savingMcp;
-
-            return (
-              <div
-                key={item.key}
-                role="button"
-                tabIndex={0}
-                onClick={() =>
-                  onOpenMcpDetail(item.kind === "core" ? item.key : undefined)
-                }
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onOpenMcpDetail(item.kind === "core" ? item.key : undefined);
-                  }
-                }}
-                className={`rounded-[10px] border tako-mcp-cell flex flex-col justify-between gap-1.5 transition select-none min-w-0 cursor-pointer ${
-                  enabled
-                    ? "bg-[var(--accent-soft)]/50 border-[var(--accent-border)] text-[var(--accent)] hover:bg-[var(--accent-soft)]"
-                    : "bg-[var(--bg-subtle)]/55 border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1.5 min-w-0">
-                  <span className="flex items-center gap-1.5 min-w-0 text-[12px] font-semibold">
-                    <Icon className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">{item.label}</span>
-                  </span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={enabled}
-                    aria-label={`切换${item.label}开关`}
-                    data-testid={
-                      item.kind === "webpage"
-                        ? "toggle-mcp-webpage"
-                        : `toggle-mcp-${item.key}`
-                    }
-                    disabled={!interactive}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!interactive) return;
-                      if (item.kind === "webpage") {
-                        onToggleWebPageMcp(!enabled);
-                      } else {
-                        onToggleCoreMcp(item.key);
-                      }
-                    }}
-                    title={enabled ? "已开启 · 点击关闭" : "已关闭 · 点击开启"}
-                    className={`h-[18px] px-1.5 rounded-full border inline-flex items-center shrink-0 transition cursor-pointer disabled:opacity-50 ${
-                      enabled
-                        ? "bg-[var(--success-soft)] border-[var(--success-border)]"
-                        : "bg-[var(--bg-card)]/90 border-[var(--border-strong)]"
-                    }`}
-                  >
-                    <span
-                      className={`h-2 w-2 rounded-full transition-colors ${
-                        enabled
-                          ? "bg-[var(--success)] shadow-[0_0_6px_var(--success-ring)]"
-                          : "bg-[var(--text-muted)]/60"
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                <div className="flex items-center justify-between gap-1 min-w-0">
-                  <span className="text-[10.5px] leading-tight text-[var(--text-muted)] truncate">
-                    {item.subtitle}
-                  </span>
-                  <span className="text-[10px] font-medium text-[var(--text-muted)] shrink-0">
-                    {item.kind === "webpage" ? "授权" : "演示"} ›
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-      {/* Section 3: Universal Extensions Hub Framed Module */}
-      <section
-        data-testid="ext-hub-home-section"
-        className="tako-mcp-section border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)] min-w-0"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-[var(--density-list-gap)]">
-          <div className="flex items-center gap-2 min-w-0">
-            <LayoutGrid className="h-4 w-4 text-[var(--accent)] shrink-0" />
-            <h2 className="text-[13px] font-semibold text-[var(--text-primary)] shrink-0">
-              通用扩展中心
-            </h2>
-            <span className="hidden min-[480px]:inline-flex items-center h-5 px-2.5 rounded-full bg-[var(--bg-pill)] border border-[var(--border)] text-[11px] font-medium text-[var(--text-secondary)] truncate">
-              Claude · Codex · Antigravity
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              data-testid="open-ext-hub"
-              onClick={() => onOpenExtensions()}
-              className="h-7 px-2.5 rounded-full border border-[var(--accent-border)] bg-[var(--accent-soft)] hover:bg-[var(--accent-border)] text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-1 transition cursor-pointer"
-            >
-              <span>打开扩展中心</span>
-              <ChevronRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 min-[760px]:grid-cols-4 tako-list-stack">
-          {(
-            [
-              {
-                id: "mcp",
-                label: "通用 MCP",
-                icon: Plug,
-                count: extensionsSummary?.mcpCount ?? 0,
-                countText: `${extensionsSummary?.mcpCount ?? 0} 个服务`,
-                subtitle: "三端开关 · 粘贴导入",
-              },
-              {
-                id: "skills",
-                label: "Skills 技能",
-                icon: Zap,
-                count: extensionsSummary?.skillsCount ?? 0,
-                countText:
-                  (extensionsSummary?.skillsUpdatableCount ?? 0) > 0
-                    ? `${extensionsSummary?.skillsCount ?? 0} 项 · ${extensionsSummary?.skillsUpdatableCount} 可更新`
-                    : `${extensionsSummary?.skillsCount ?? 0} 项`,
-                subtitle: "本地/ZIP · GitHub",
-              },
-              {
-                id: "plugins",
-                label: "插件管理",
-                icon: Puzzle,
-                count: extensionsSummary?.pluginsCount ?? 0,
-                countText: `${extensionsSummary?.pluginsCount ?? 0} 个已安装`,
-                subtitle: "内置 CLI · 发现与市场",
-              },
-              {
-                id: "prompts",
-                label: "提示词预设",
-                icon: FileText,
-                count: extensionsSummary?.promptsCount ?? 0,
-                countText: `${extensionsSummary?.promptsCount ?? 0} 套预设`,
-                subtitle: "双栏直编 · 汉化共存",
-              },
-            ] satisfies {
-              id: ExtensionTab;
-              label: string;
-              icon: typeof Plug;
-              count: number;
-              countText: string;
-              subtitle: string;
-            }[]
-          ).map(({ id, label, icon: Icon, count, countText, subtitle }) => (
-            <button
-              key={id}
-              type="button"
-              data-testid={`open-ext-hub-${id}`}
-              title={`${label}（${countText}）· ${subtitle}`}
-              onClick={() => onOpenExtensions(id)}
-              className="group rounded-[10px] border border-[var(--border)] bg-[var(--bg-subtle)]/55 hover:bg-[var(--accent-soft)]/40 hover:border-[var(--accent-border)] tako-mcp-cell flex flex-col justify-between gap-1.5 text-left transition select-none min-w-0 cursor-pointer"
-            >
-              <div className="flex items-center justify-between gap-1.5 min-w-0 w-full">
-                <span className="flex items-center gap-1.5 min-w-0 text-[12px] font-semibold text-[var(--text-primary)]">
-                  <Icon
-                    className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]"
-                    strokeWidth={1.9}
-                  />
-                  <span className="truncate">{label}</span>
+        return (
+          <section className="grid grid-cols-1 min-[640px]:grid-cols-3 gap-[var(--density-section-gap)] min-w-0">
+            {/* Card 1: Tako Super MCP */}
+            <article className="tako-card-surface border border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--border-strong)] shadow-[var(--shadow-card)] px-[var(--density-card-px)] py-[var(--density-card-py)] flex flex-col gap-2.5 min-w-0 transition-colors">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="h-7 w-7 rounded-[8px] bg-[var(--accent-soft)] text-[var(--accent)] inline-flex items-center justify-center shrink-0">
+                  <Sparkles className="h-3.5 w-3.5" strokeWidth={1.9} />
                 </span>
-                <ChevronRight className="h-3 w-3 shrink-0 text-[var(--text-muted)] group-hover:text-[var(--accent)] transition-colors" />
+                <h2 className="text-[13.5px] font-semibold text-[var(--text-primary)] truncate">
+                  Tako 超级 MCP
+                </h2>
               </div>
 
-              <div className="flex items-baseline justify-between gap-1.5 min-w-0 w-full">
-                <span
-                  className={`shrink-0 tabular-nums text-[11px] font-semibold leading-tight ${
-                    count > 0
-                      ? "text-[var(--success)]"
-                      : "text-[var(--text-muted)]"
-                  }`}
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold text-[var(--text-primary)] tabular-nums">
+                  核心能力 {mcpEnabledCount} / {mcpTotalCount} 已开启
+                </div>
+                <p className="text-[11.5px] text-[var(--text-secondary)] truncate mt-0.5">
+                  图像 · 视频 · 声音 · 搜索 · 多模型会诊
+                </p>
+              </div>
+
+              <div className="mt-auto pt-1">
+                <button
+                  type="button"
+                  data-testid="open-mcp-center"
+                  onClick={() => onOpenMcpDetail()}
+                  className="w-full h-[29px] px-2.5 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] hover:border-[var(--border-strong)] text-[12px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1 transition cursor-pointer"
                 >
-                  {countText}
-                </span>
-                <span className="min-w-0 truncate text-[10.5px] leading-tight text-[var(--text-muted)]">
-                  {subtitle}
-                </span>
+                  <span>配置与演示 →</span>
+                </button>
               </div>
-            </button>
-          ))}
-        </div>
-      </section>
+            </article>
+
+            {/* Card 2: Website Hosting · Tako Web Page */}
+            <article
+              data-testid="overview-webpage-card"
+              className="tako-card-surface border border-[var(--accent-border)] hover:border-[var(--accent)]/60 shadow-[var(--shadow-card)] px-[var(--density-card-px)] py-[var(--density-card-py)] flex flex-col gap-2.5 min-w-0 transition-colors"
+              style={{ background: "var(--webpage-grad)" }}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="h-7 w-7 rounded-[8px] bg-[var(--success-soft)] text-[var(--success)] inline-flex items-center justify-center shrink-0">
+                  <Globe2 className="h-3.5 w-3.5" strokeWidth={1.9} />
+                </span>
+                <h2 className="text-[13.5px] font-semibold text-[var(--text-primary)] truncate">
+                  网站托管 · Web Page
+                </h2>
+              </div>
+
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold text-[var(--text-primary)] truncate">
+                  {wpStatusText}
+                </div>
+                <p className="text-[11.5px] text-[var(--text-secondary)] truncate mt-0.5 tabular-nums">
+                  {siteCount > 0
+                    ? `${siteCount} 个站点${previewCount > 0 ? ` · ${previewCount} 个预览` : ""}`
+                    : "拖入目录或对话一句话上线"}
+                  {" · AI MCP "}
+                  {mcp?.webPage ? "已启用" : "已关闭"}
+                </p>
+              </div>
+
+              <div className="mt-auto pt-1 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  data-testid="overview-webpage-deploy"
+                  onClick={() => onOpenWebPage(true)}
+                  className="h-[29px] px-2.5 rounded-[8px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-medium inline-flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+                >
+                  <Rocket className="h-3 w-3 shrink-0" />
+                  <span>快捷部署</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="open-webpage"
+                  onClick={() => onOpenWebPage(false)}
+                  className="flex-1 h-[29px] px-2.5 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] hover:border-[var(--border-strong)] text-[12px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center transition cursor-pointer min-w-0"
+                >
+                  <span>管理 →</span>
+                </button>
+              </div>
+            </article>
+
+            {/* Card 3: Universal Extensions Hub (preserves all existing E2E testids) */}
+            <article
+              data-testid="ext-hub-home-section"
+              className="tako-card-surface border border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--border-strong)] shadow-[var(--shadow-card)] px-[var(--density-card-px)] py-[var(--density-card-py)] flex flex-col gap-2.5 min-w-0 transition-colors"
+            >
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="h-7 w-7 rounded-[8px] bg-[var(--coral-soft)] text-[var(--coral)] inline-flex items-center justify-center shrink-0">
+                    <LayoutGrid className="h-3.5 w-3.5" strokeWidth={1.9} />
+                  </span>
+                  <h2 className="text-[13.5px] font-semibold text-[var(--text-primary)] truncate">
+                    通用扩展中心
+                  </h2>
+                </div>
+                {extSkillsUpdatable > 0 && (
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[var(--success-soft)] text-[var(--success)] shrink-0 tabular-nums">
+                    {extSkillsUpdatable} 可更新
+                  </span>
+                )}
+              </div>
+
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold text-[var(--text-primary)] tabular-nums">
+                  共 {extTotalCount} 项扩展
+                </div>
+                <div className="grid grid-cols-2 min-[760px]:flex min-[760px]:items-center min-[760px]:justify-between gap-x-1.5 gap-y-1 mt-1 text-[11px] text-[var(--text-secondary)] tabular-nums">
+                  {(
+                    [
+                      { id: "mcp", label: "MCP", count: extMcpCount, updatable: 0 },
+                      {
+                        id: "skills",
+                        label: "Skills",
+                        count: extSkillsCount,
+                        updatable: extSkillsUpdatable,
+                      },
+                      { id: "plugins", label: "插件", count: extPluginsCount, updatable: 0 },
+                      { id: "prompts", label: "预设", count: extPromptsCount, updatable: 0 },
+                    ] as const
+                  ).map((item) => {
+                    const detailText =
+                      item.updatable > 0
+                        ? `${item.count} 项 · ${item.updatable} 可更新`
+                        : `${item.count} 项`;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        data-testid={`open-ext-hub-${item.id}`}
+                        onClick={() => onOpenExtensions(item.id)}
+                        title={`${item.label}：${detailText}`}
+                        className="relative inline-flex items-center gap-1 text-left min-[760px]:justify-center whitespace-nowrap rounded-[5px] px-1 py-0.5 -mx-1 hover:bg-[var(--bg-subtle)] hover:text-[var(--accent)] transition cursor-pointer"
+                      >
+                        <span aria-hidden="true">
+                          {item.label} {item.count}
+                        </span>
+                        {item.updatable > 0 && (
+                          <span
+                            aria-hidden="true"
+                            className="h-1.5 w-1.5 rounded-full bg-[var(--success)] shrink-0"
+                          />
+                        )}
+                        <span className="sr-only">
+                          {item.label} {detailText}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-auto pt-1">
+                <button
+                  type="button"
+                  data-testid="open-ext-hub"
+                  onClick={() => onOpenExtensions()}
+                  className="w-full h-[29px] px-2.5 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-subtle)] hover:border-[var(--border-strong)] text-[12px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1 transition cursor-pointer"
+                >
+                  <span>打开扩展中心 →</span>
+                </button>
+              </div>
+            </article>
+          </section>
+        );
+      })()}
     </div>
   );
 }

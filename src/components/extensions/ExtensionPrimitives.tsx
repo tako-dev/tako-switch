@@ -28,13 +28,15 @@ export const EXT_PLATFORMS: { id: ExtPlatform; label: string }[] = [
 ];
 
 export const EXT_BUTTON =
-  "ext-button inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-2.5 text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer";
+  "ext-button inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] px-2.5 text-[12px] font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50 transition cursor-pointer";
 export const EXT_PRIMARY_BUTTON =
-  "ext-button inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent bg-[var(--accent)] px-3 text-[12px] font-semibold text-[var(--on-accent)] hover:bg-[var(--accent-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer";
+  "ext-button inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[8px] border border-transparent bg-[var(--accent)] px-3 text-[12px] font-semibold text-[var(--on-accent)] hover:bg-[var(--accent-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50 transition cursor-pointer";
+export const EXT_DANGER_BUTTON =
+  "ext-button inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[8px] border border-[var(--danger)]/35 bg-[var(--danger-soft)] px-3 text-[12px] font-semibold text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white focus-visible:outline-2 focus-visible:outline-[var(--danger)] disabled:cursor-not-allowed disabled:opacity-50 transition cursor-pointer";
 export const EXT_ICON_BUTTON =
-  "inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer";
+  "inline-flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-[7px] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 transition cursor-pointer";
 export const EXT_INPUT =
-  "min-w-0 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-canvas)] px-2.5 py-2 text-[12px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]";
+  "min-w-0 w-full rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-2 text-[12px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-soft)] transition";
 
 export interface ExtensionSecondaryAction {
   label: string;
@@ -81,7 +83,7 @@ export function ExtSearchInput({
   testId: string;
 }) {
   return (
-    <label className="ext-button flex flex-1 min-w-[150px] max-w-[280px] items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-2.5 text-[var(--text-muted)] focus-within:border-[var(--accent)]">
+    <label className="ext-button flex flex-1 min-w-[150px] max-w-[300px] items-center gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] px-2.5 text-[var(--text-muted)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent-soft)] transition">
       <Search className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       <input
         data-testid={testId}
@@ -185,7 +187,7 @@ export function ExtHelpPopover({
         <div
           id={id}
           role="tooltip"
-          className="absolute right-0 top-full z-40 mt-1 w-[min(340px,calc(100vw-32px))] rounded-lg border border-[var(--border)] bg-[var(--bg-card)] p-3 text-[11.5px] leading-relaxed text-[var(--text-secondary)] shadow-[var(--shadow-modal)] break-words"
+          className="selectable absolute right-0 top-full z-40 mt-1.5 w-[min(320px,calc(100vw-32px))] rounded-[12px] border border-[var(--border)] bg-[var(--bg-card)] p-3 text-[11.5px] leading-relaxed text-[var(--text-secondary)] shadow-[var(--shadow-modal)] break-words"
         >
           {children}
         </div>
@@ -360,9 +362,9 @@ export function ExtSlideDrawer({
         role="dialog"
         aria-modal="true"
         aria-labelledby={id}
-        className="flex h-full w-[min(500px,94vw)] min-w-0 flex-col border-l border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-modal)]"
+        className="flex h-full w-[min(480px,calc(100vw-24px))] min-w-0 flex-col border-l border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-modal)]"
       >
-        <header className="flex h-[48px] shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] px-4">
+        <header className="flex h-[52px] shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] px-4">
           <h2
             id={id}
             className="min-w-0 truncate text-[14px] font-semibold text-[var(--text-primary)]"
@@ -384,7 +386,7 @@ export function ExtSlideDrawer({
           {children}
         </div>
         {footer && (
-          <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
+          <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border)] bg-[var(--bg-subtle)]/40 px-4 py-3">
             {footer}
           </footer>
         )}
@@ -443,7 +445,7 @@ export function ExtMatrixHeader({
 }) {
   return (
     <div
-      className="grid min-w-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--bg-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]"
+      className="grid min-w-0 items-center gap-1 border-b border-[var(--border)] bg-[var(--bg-subtle)]/80 px-3 py-2 text-[11px] font-medium text-[var(--text-secondary)]"
       style={{ gridTemplateColumns: columns }}
     >
       <span className="min-w-0 truncate">{leadingLabel}</span>

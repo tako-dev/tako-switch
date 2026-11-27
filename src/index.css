@@ -383,13 +383,26 @@ pre,
 }
 
 @media (max-width: 759px) {
+  .ext-hub-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .ext-hub-tabs {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
   .ext-hub-tab {
-    padding-inline: 5px;
+    padding-inline: 4px;
     gap: 4px;
   }
 
   .ext-hub-toolbar > :last-child {
-    gap: 4px;
+    justify-content: flex-end;
+    gap: 6px;
   }
 }
 

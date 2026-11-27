@@ -29,6 +29,7 @@ import {
 import { SegmentedControl, ToggleSwitch } from "../UiPrimitives";
 import {
   EXT_BUTTON,
+  EXT_DANGER_BUTTON,
   EXT_ICON_BUTTON,
   EXT_INPUT,
   EXT_PLATFORMS,
@@ -236,14 +237,13 @@ export function McpHubView({
     >
       <div
         data-testid="ext-mcp-tako-notice"
-        className="flex min-w-0 items-center justify-between gap-2 border-b border-[var(--border)] pb-3 text-[11px] text-[var(--text-muted)]"
+        className="flex min-w-0 items-center justify-between gap-2 rounded-[9px] bg-[var(--bg-subtle)]/80 px-3 py-2 text-[11.5px] text-[var(--text-secondary)]"
       >
         <span
           className="min-w-0 truncate"
-          title="Tako 超级 MCP（图像 / 视频 / 语音 / 搜索 / 会诊 / 网站上线）已独立托管，不在此列表显示"
+          title="Tako 超级 MCP（图像 / 视频 / 语音 / 搜索 / 会诊）与网站托管已独立托管，不在此列表显示"
         >
-          Tako 超级 MCP（图像 / 视频 / 语音 / 搜索 / 会诊 /
-          网站上线）已独立托管，不在此列表显示
+          Tako 超级 MCP 与网站托管能力已独立管理，此处仅展示三端自定义 MCP 服务
         </span>
         <button
           type="button"
@@ -305,13 +305,13 @@ export function McpHubView({
           </ExtHelpPopover>
         </div>
       )}
-      <div className="min-w-0 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card)]">
+      <div className="tako-card-surface min-w-0 overflow-hidden border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)]">
         <ExtMatrixHeader />
         {entries.map((entry) => (
           <div
             key={entry.id}
             data-testid={`ext-mcp-row-${entry.id}`}
-            className="grid min-w-0 items-center gap-1 border-b border-[var(--border)] px-3 py-3 last:border-b-0"
+            className="grid min-w-0 items-center gap-1 border-b border-[var(--border)] px-3 py-3 last:border-b-0 hover:bg-[var(--bg-subtle)]/35 transition-colors"
             style={{
               gridTemplateColumns: "minmax(0, 1fr) 70px 64px 76px 86px",
             }}
@@ -433,7 +433,7 @@ export function McpHubView({
               </button>
               <button
                 type="button"
-                className={EXT_PRIMARY_BUTTON}
+                className={EXT_DANGER_BUTTON}
                 disabled={busy}
                 onClick={() => {
                   void run(

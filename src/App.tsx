@@ -12,6 +12,8 @@ import {
   type AppSnapshot,
   type AppUpdateStatus,
   type DashboardPayload,
+  type EdgeOneSiteRecord,
+  type EdgeOneStatus,
   type ExtensionsSummary,
   type InstallProgressEvent,
   type McpToolsConfig,
@@ -32,6 +34,7 @@ import { McpCenterPanel } from "./components/McpCenterPanel";
 import type { McpToolKey } from "./components/McpInlineTheater";
 import { ModelPickerModal } from "./components/ModelPickerModal";
 import { OverviewPanel } from "./components/OverviewPanel";
+import { WebPagePanel } from "./components/WebPagePanel";
 import { TopHeaderBar } from "./components/TopHeaderBar";
 import { UiPatchPermissionModal } from "./components/UiPatchPermissionModal";
 import {
@@ -140,6 +143,9 @@ export default function App() {
   const [showChangelogModal, setShowChangelogModal] = useState(false);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [mcpInitialTab, setMcpInitialTab] = useState<McpToolKey | null>(null);
+  const [edgeOneStatus, setEdgeOneStatus] = useState<EdgeOneStatus | null>(null);
+  const [edgeOneSites, setEdgeOneSites] = useState<EdgeOneSiteRecord[]>([]);
+  const [webPageAutoDeploy, setWebPageAutoDeploy] = useState(false);
   const [extensionTab, setExtensionTab] = useState<ExtensionTab>("mcp");
   const [extensionsSummary, setExtensionsSummary] = useState<ExtensionsSummary | null>(null);
   const extensionNavigationGuardRef = useRef<ExtensionNavigationGuard | null>(null);
@@ -286,6 +292,60 @@ export default function App() {
       setStatusNote((prev) => (prev === msg ? null : prev));
     }, 3000);
   }, []);
+
+  const refreshEdgeOneSites = useCallback(async () => {
+    try {
+      const raw = await api.listEdgeOneSites();
+      const list = Array.isArray(raw) ? raw : [];
+      setEdgeOneSites(list);
+      return list;
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const refreshEdgeOneStatus = useCallback(async (force = false) => {
+    try {
+      if (!force) {
+        // Sub-millisecond cached read first so UI renders immediately without waiting for Node/CLI
+        const cached = await api.getEdgeOneStatus(false, true);
+        if (!cached || typeof cached !== "object") return null;
+        setEdgeOneStatus(cached);
+        if (cached.ready && cached.hasLocalCredentials && !cached.authenticated && !cached.cached) {
+          void api
+            .getEdgeOneStatus(false, false)
+            .then((fresh) => {
+              if (fresh && typeof fresh === "object") setEdgeOneStatus(fresh);
+            })
+            .catch(() => {});
+        }
+        return cached;
+      }
+      const fresh = await api.getEdgeOneStatus(true, false);
+      if (!fresh || typeof fresh !== "object") return null;
+      setEdgeOneStatus(fresh);
+      return fresh;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshEdgeOneSites();
+    void refreshEdgeOneStatus(false);
+    let active = true;
+    const unsubs: Array<() => void> = [];
+    void listen("edgeone-status-updated", () => {
+      if (active) void refreshEdgeOneStatus(false);
+    }).then((u) => unsubs.push(u));
+    void listen("edgeone-sites-changed", () => {
+      if (active) void refreshEdgeOneSites();
+    }).then((u) => unsubs.push(u));
+    return () => {
+      active = false;
+      unsubs.forEach((fn) => fn());
+    };
+  }, [refreshEdgeOneSites, refreshEdgeOneStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1027,6 +1087,7 @@ export default function App() {
       activeRoute !== "overview" &&
       activeRoute !== "general" &&
       activeRoute !== "mcp" &&
+      activeRoute !== "webpage" &&
       activeRoute !== "extensions" &&
       hiddenAppsSet.has(activeRoute)
     ) {
@@ -1427,7 +1488,6 @@ export default function App() {
       mcp.audio,
       mcp.search,
       mcp.consult,
-      Boolean(mcp.webPage),
     ].filter(Boolean).length;
   }, [dashboard]);
 
@@ -1442,6 +1502,7 @@ export default function App() {
       activeRoute === "overview" ||
       activeRoute === "general" ||
       activeRoute === "mcp" ||
+      activeRoute === "webpage" ||
       activeRoute === "extensions"
     ) {
       return null;
@@ -1543,7 +1604,7 @@ export default function App() {
             uiPatchProgress={uiPatchProgress}
             savingMcp={savingMcp}
             mcpEnabledCount={mcpEnabledCount}
-            mcpTotalCount={6}
+            mcpTotalCount={5}
             selfUpdateSummary={{
               status: selfUpdateStatus,
               version: selfUpdate?.version,
@@ -1554,6 +1615,12 @@ export default function App() {
             onOpenMcpDetail={(tab) => {
               setMcpInitialTab(tab ?? null);
               setActiveRoute("mcp");
+            }}
+            edgeOneStatus={edgeOneStatus}
+            edgeOneSites={edgeOneSites}
+            onOpenWebPage={(autoDeploy = false) => {
+              setWebPageAutoDeploy(Boolean(autoDeploy));
+              navigate("webpage");
             }}
             extensionsSummary={extensionsSummary}
             onOpenExtensions={(tab) => {
@@ -1602,7 +1669,7 @@ export default function App() {
               error: selfUpdateError,
             }}
             mcpEnabledCount={mcpEnabledCount}
-            mcpTotalCount={6}
+            mcpTotalCount={5}
             onEnsureGateway={() => void handleEnsureGateway()}
             onOAuthLogin={() => void handleOAuthLogin()}
             onOpenKeyModal={handleOpenKeyModal}
@@ -1628,15 +1695,37 @@ export default function App() {
             savingMcp={savingMcp}
             loggedIn={Boolean(dashboard?.account.loggedIn)}
             loggingIn={loggingIn}
+            edgeOneStatus={edgeOneStatus}
+            edgeOneSites={edgeOneSites}
             initialDrawerTab={mcpInitialTab}
             onConsumeInitialTab={() => setMcpInitialTab(null)}
             onGoHome={() => setActiveRoute("overview")}
+            onOpenWebPage={() => navigate("webpage")}
             onToggleCoreTool={(key) => void handleToggleMcpTool(key)}
             onToggleWebPage={handleToggleWebPage}
-            onSaveEdgeOneConfig={handleSaveEdgeOneConfig}
             onSelectConsultModel={(model) => void handleSelectConsultModel(model)}
             onRequestLogin={() => void handleOAuthLogin()}
-            onEdgeOneChanged={() => void loadDashboard(false)}
+            onNotify={showTransientNote}
+          />
+        )}
+
+        {activeRoute === "webpage" && (
+          <WebPagePanel
+            mcp={dashboard?.state.mcp ?? null}
+            savingMcp={savingMcp}
+            edgeOneStatus={edgeOneStatus}
+            sites={edgeOneSites}
+            autoFocusDeploy={webPageAutoDeploy}
+            onConsumeAutoFocusDeploy={() => setWebPageAutoDeploy(false)}
+            onStatusChange={(st) => {
+              setEdgeOneStatus(st);
+              void loadDashboard(false);
+            }}
+            onSitesChange={setEdgeOneSites}
+            onRefreshStatus={refreshEdgeOneStatus}
+            onRefreshSites={refreshEdgeOneSites}
+            onToggleWebPage={handleToggleWebPage}
+            onSaveEdgeOneConfig={handleSaveEdgeOneConfig}
             onNotify={showTransientNote}
           />
         )}
@@ -1687,6 +1776,7 @@ export default function App() {
         {activeRoute !== "overview" &&
           activeRoute !== "general" &&
           activeRoute !== "mcp" &&
+          activeRoute !== "webpage" &&
           activeRoute !== "extensions" &&
           !selectedClientApp && (
             <div className="w-full px-5 py-12 text-center text-[13px] text-[var(--text-muted)]">

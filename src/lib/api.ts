@@ -96,6 +96,8 @@ export interface EdgeOneStatus {
   workspaceStatus: string | null;
   workspaces: EdgeOneWorkspace[];
   error: string | null;
+  cached?: boolean;
+  checkedAt?: number | null;
 }
 
 export interface EdgeOneProgressEvent {
@@ -103,6 +105,102 @@ export interface EdgeOneProgressEvent {
   percent: number;
   message: string;
   loginUrl?: string | null;
+}
+
+export interface EdgeOneDeployProgressEvent {
+  stage: string;
+  percent: number;
+  message: string;
+  projectName?: string | null;
+  logLine?: string | null;
+  elapsedMs: number;
+}
+
+export interface EdgeOneDeployRequest {
+  path: string;
+  projectName?: string | null;
+  environment?: "production" | "preview" | string;
+  area?: "global" | "overseas" | string;
+  source?: string | null;
+}
+
+export interface EdgeOneDeployResult {
+  url: string;
+  projectName: string;
+  projectId: string | null;
+  deploymentId: string | null;
+  consoleUrl: string | null;
+  environment: string;
+  area: string;
+  durationMs?: number | null;
+}
+
+export interface EdgeOneSiteDeployment {
+  id: string;
+  url: string;
+  deploymentId?: string | null;
+  environment: string;
+  area: string;
+  source: string;
+  deployedAt: number;
+  durationMs?: number | null;
+}
+
+export interface EdgeOneSiteRecord {
+  id: string;
+  projectName: string;
+  projectId?: string | null;
+  url: string;
+  consoleUrl?: string | null;
+  environment: string;
+  area: string;
+  source: string;
+  workspaceId?: string | null;
+  workspaceName?: string | null;
+  localSourcePath?: string | null;
+  localSourceExists: boolean;
+  pinned: boolean;
+  note?: string | null;
+  deployedAt: number;
+  deployCount: number;
+  history: EdgeOneSiteDeployment[];
+}
+
+export interface EdgeOneSourceInspection {
+  path: string;
+  exists: boolean;
+  kind: "folder" | "html" | "zip" | "missing" | "unsupported" | string;
+  name: string;
+  fileCount: number;
+  totalBytes: number;
+  hasIndexHtml: boolean;
+  hasPackageJson: boolean;
+  linkedProjectName: string | null;
+  suggestedProjectName: string;
+  valid: boolean;
+  warning: string | null;
+}
+
+export interface EdgeOneSiteHealth {
+  url: string;
+  reachable: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  checkedAt: number;
+  error: string | null;
+}
+
+export interface EdgeOneEnvVar {
+  key: string;
+  value: string;
+  environment: string;
+}
+
+export interface EdgeOneSiteMetaPatch {
+  id: string;
+  pinned?: boolean;
+  note?: string;
+  localSourcePath?: string;
 }
 
 export type ModelFilterMode = "recommended" | "custom" | "all";
@@ -792,8 +890,8 @@ export const api = {
   runMcpLiveDemo: (input: LiveDemoRequest) =>
     invoke<LiveDemoResult>("run_mcp_live_demo", { input }),
   checkNodeRuntime: () => invoke<NodeRuntimeInfo>("check_node_runtime"),
-  getEdgeOneStatus: (refreshAccount = true) =>
-    invoke<EdgeOneStatus>("get_edgeone_status", { refreshAccount }),
+  getEdgeOneStatus: (refreshAccount = true, cacheOnly = false) =>
+    invoke<EdgeOneStatus>("get_edgeone_status", { refreshAccount, cacheOnly }),
   installEdgeOneRuntime: (forceUpgrade = false) =>
     invoke<EdgeOneStatus>("install_edgeone_runtime", { forceUpgrade }),
   loginEdgeOne: (site: "china" | "global" = "china") =>
@@ -802,6 +900,69 @@ export const api = {
   switchEdgeOneWorkspace: (workspace: string) =>
     invoke<EdgeOneStatus>("switch_edgeone_workspace", { workspace }),
   logoutEdgeOne: () => invoke<EdgeOneStatus>("logout_edgeone"),
+  listEdgeOneSites: () => invoke<EdgeOneSiteRecord[]>("list_edgeone_sites"),
+  inspectEdgeOneSource: (path: string) =>
+    invoke<EdgeOneSourceInspection>("inspect_edgeone_source", { path }),
+  pickEdgeOneSource: (kind: "folder" | "file" = "folder") =>
+    invoke<string | null>("pick_edgeone_source", { kind }),
+  createEdgeOneSampleSite: () =>
+    invoke<EdgeOneSourceInspection>("create_edgeone_sample_site"),
+  deployEdgeOneWebsite: (req: EdgeOneDeployRequest) =>
+    invoke<EdgeOneDeployResult>("deploy_edgeone_website", { req }),
+  cancelEdgeOneDeploy: () => invoke<boolean>("cancel_edgeone_deploy"),
+  updateEdgeOneSiteMeta: (patch: EdgeOneSiteMetaPatch) =>
+    invoke<EdgeOneSiteRecord[]>("update_edgeone_site_meta", { patch }),
+  removeEdgeOneSiteRecord: (id: string) =>
+    invoke<EdgeOneSiteRecord[]>("remove_edgeone_site_record", { id }),
+  checkEdgeOneSitesHealth: (urls: string[]) =>
+    invoke<EdgeOneSiteHealth[]>("check_edgeone_sites_health", { urls }),
+  openLocalPath: (path: string) => invoke<void>("open_local_path", { path }),
+  edgeoneEnvList: (
+    projectPath: string,
+    projectName?: string | null,
+    environment: "production" | "preview" = "production",
+  ) =>
+    invoke<EdgeOneEnvVar[]>("edgeone_env_list", {
+      projectPath,
+      projectName: projectName ?? null,
+      environment,
+    }),
+  edgeoneEnvSet: (
+    projectPath: string,
+    projectName: string | null | undefined,
+    key: string,
+    value: string,
+    environment: "production" | "preview" = "production",
+  ) =>
+    invoke<EdgeOneEnvVar[]>("edgeone_env_set", {
+      projectPath,
+      projectName: projectName ?? null,
+      key,
+      value,
+      environment,
+    }),
+  edgeoneEnvRemove: (
+    projectPath: string,
+    projectName: string | null | undefined,
+    key: string,
+    environment: "production" | "preview" = "production",
+  ) =>
+    invoke<EdgeOneEnvVar[]>("edgeone_env_remove", {
+      projectPath,
+      projectName: projectName ?? null,
+      key,
+      environment,
+    }),
+  edgeoneEnvPull: (
+    projectPath: string,
+    projectName: string | null | undefined,
+    environment: "production" | "preview" = "production",
+  ) =>
+    invoke<string>("edgeone_env_pull", {
+      projectPath,
+      projectName: projectName ?? null,
+      environment,
+    }),
   getExtensionsSummary: () => invoke<ExtensionsSummary>("get_extensions_summary"),
   getMcpHubSnapshot: () => invoke<McpHubSnapshot>("get_mcp_hub_snapshot"),
   upsertMcpEntry: (entry: McpEntry) => invoke<McpHubSnapshot>("upsert_mcp_entry", { entry }),

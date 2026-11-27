@@ -27,6 +27,7 @@ import {
 import { ToggleSwitch } from "../UiPrimitives";
 import {
   EXT_BUTTON,
+  EXT_DANGER_BUTTON,
   EXT_ICON_BUTTON,
   EXT_INPUT,
   EXT_PLATFORMS,
@@ -73,6 +74,17 @@ export function PromptsHubView({
   const [syncTargets, setSyncTargets] = useState<ExtPlatform[]>([]);
   const [syncActivate, setSyncActivate] = useState(false);
   const syncRef = useRef<HTMLDivElement>(null);
+  const [isNarrow, setIsNarrow] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 759px)").matches : false,
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 759px)");
+    const onChange = (e: MediaQueryListEvent) => setIsNarrow(e.matches);
+    setIsNarrow(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   const state = snapshot?.platforms[platform];
   const selected = state?.presets.find((preset) => preset.id === selectedId);
@@ -261,10 +273,10 @@ export function PromptsHubView({
       className="flex min-w-0 flex-col gap-3"
     >
       <ExtError message={error} />
-      <div className="flex min-w-0 flex-col gap-2 border-b border-[var(--border)] pb-3">
-        <div className="flex min-w-0 items-center justify-between gap-3">
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
           <div
-            className="inline-flex shrink-0 rounded-lg border border-[var(--border)] bg-[var(--bg-pill)] p-0.5"
+            className="inline-flex shrink-0 rounded-[8px] border border-[var(--border)] bg-[var(--bg-pill)] p-0.5"
             role="tablist"
             aria-label="提示词平台"
           >
@@ -284,33 +296,40 @@ export function PromptsHubView({
                     setSyncOpen(false);
                   })
                 }
-                className={`ext-button whitespace-nowrap rounded-md px-2.5 text-[11.5px] cursor-pointer disabled:opacity-50 ${platform === item.id ? "bg-[var(--bg-card)] font-semibold text-[var(--text-primary)] shadow-[var(--shadow-segment)]" : "text-[var(--text-secondary)]"}`}
+                className={`h-[var(--density-ctrl-sm-h)] whitespace-nowrap rounded-[6px] px-2.5 text-[12px] cursor-pointer disabled:opacity-50 transition ${platform === item.id ? "bg-[var(--bg-card)] font-semibold text-[var(--text-primary)] shadow-[var(--shadow-segment)]" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"}`}
               >
                 {item.label}
               </button>
             ))}
           </div>
-          <div className="flex min-w-0 items-center justify-end gap-2 text-[10.5px] text-[var(--text-muted)]">
-            <span className="min-w-0 truncate font-mono" title={state?.path}>
-              {state?.path}
-            </span>
-            <span className="shrink-0 whitespace-nowrap tabular-nums">
-              {formatSize(state?.liveBytes ?? 0)}
-            </span>
-            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded bg-[var(--success-soft)] px-1.5 py-1 text-[var(--success)]">
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--success-soft)] px-2.5 py-1 text-[11px] font-medium text-[var(--success)]">
               <LockKeyhole className="h-3 w-3" />
-              汉化规则共存保护
+              汉化规则受保护
             </span>
             <ExtHelpPopover label="提示词目标路径">
-              <span className="break-all font-mono">{state?.path}</span>
+              <p className="mb-1.5 font-medium text-[var(--text-primary)]">目标写入路径</p>
+              <span className="break-all font-mono text-[11px]">{state?.path}</span>
             </ExtHelpPopover>
           </div>
         </div>
+        <div className="flex min-w-0 items-center gap-2 text-[11px] text-[var(--text-muted)] px-0.5">
+          <span className="min-w-0 truncate font-mono" title={state?.path}>
+            {state?.path}
+          </span>
+          <span className="shrink-0">·</span>
+          <span className="shrink-0 whitespace-nowrap tabular-nums">
+            {formatSize(state?.liveBytes ?? 0)}
+          </span>
+        </div>
       </div>
+
       <div
         className="grid min-w-0 items-stretch gap-3"
         style={{
-          gridTemplateColumns: "minmax(210px, 0.92fr) minmax(0, 1.35fr)",
+          gridTemplateColumns: isNarrow
+            ? "minmax(0, 1fr)"
+            : "minmax(210px, 0.9fr) minmax(0, 1.35fr)",
         }}
       >
         <div className="flex min-w-0 flex-col gap-2">
@@ -387,7 +406,11 @@ export function PromptsHubView({
           )}
         </div>
         <div className="flex min-w-0 flex-col">
-          <div className="relative flex min-w-0 flex-wrap items-center justify-end gap-1.5 pb-2">
+          <div className="relative flex min-w-0 flex-wrap items-center justify-between gap-1.5 pb-2">
+            <span className="text-[11px] font-medium text-[var(--text-muted)] px-0.5">
+              Markdown 正文编辑
+            </span>
+            <div className="flex items-center gap-1.5">
             <div className="relative min-w-0" ref={syncRef}>
               <button
                 type="button"
@@ -444,15 +467,16 @@ export function PromptsHubView({
             <button
               type="button"
               data-testid="ext-prompts-save-btn"
-              className={`${EXT_PRIMARY_BUTTON} !px-2 !text-[11px]`}
+              className={`${EXT_PRIMARY_BUTTON} !px-2.5 !text-[11.5px]`}
               disabled={!draft || !dirty || busy}
               onClick={() => void save()}
             >
               <Save className="h-3.5 w-3.5" />
               {busy ? "保存中..." : "保存修改"}
             </button>
+            </div>
           </div>
-          <div className="flex min-h-[290px] min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card)]">
+          <div className="tako-card-surface flex min-h-[290px] min-w-0 flex-1 flex-col overflow-hidden border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)]">
             {draft ? (
               <>
                 <div className="flex min-w-0 items-center gap-2 border-b border-[var(--border)] px-3 py-2">
@@ -465,7 +489,8 @@ export function PromptsHubView({
                     className="min-w-0 flex-1 truncate bg-transparent text-[12px] font-semibold text-[var(--text-primary)] outline-none"
                   />
                   {dirty && (
-                    <span className="shrink-0 whitespace-nowrap text-[10px] text-[var(--warning)]">
+                    <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--warning-soft)] px-2 py-0.5 text-[10.5px] font-semibold text-[var(--warning)]">
+                      <span className="h-1.5 w-1.5 rounded-full bg-[var(--warning)]" />
                       未保存
                     </span>
                   )}
@@ -546,7 +571,7 @@ export function PromptsHubView({
               </button>
               <button
                 type="button"
-                className={EXT_PRIMARY_BUTTON}
+                className={EXT_DANGER_BUTTON}
                 disabled={busy || !draft}
                 onClick={() => {
                   if (draft)

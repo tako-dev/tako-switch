@@ -70,13 +70,44 @@ export function ExtensionsHubPanel({
 
   const SecondaryIcon = actions.secondary?.icon;
   const PrimaryIcon = actions.primary?.icon;
+  const totalExtensions =
+    (summary?.mcpCount ?? 0) +
+    (summary?.skillsCount ?? 0) +
+    (summary?.pluginsCount ?? 0) +
+    (summary?.promptsCount ?? 0);
 
   return (
     <section
       className="tako-page-sub flex min-w-0 flex-col"
       data-testid="extensions-hub-panel"
     >
-      <div className="ext-hub-toolbar flex min-w-0 items-center justify-between gap-2 border-b border-[var(--border)] pb-3">
+      {/* Compact Page Header matching MCP Center & Web Page */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-bold tracking-[0.08em] uppercase text-[var(--accent)] mb-1">
+            本地扩展管理 · 三端同步
+          </div>
+          <h1 className="text-[20px] font-semibold tracking-[-0.025em] text-[var(--text-primary)] leading-tight">
+            通用扩展中心
+          </h1>
+          <p className="text-[12.5px] text-[var(--text-secondary)] mt-1">
+            集中管理 Claude、Codex 与 Antigravity 的 MCP、Skills、插件与提示词预设。
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {(summary?.skillsUpdatableCount ?? 0) > 0 && (
+            <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-[var(--success-soft)] text-[var(--success)] tabular-nums">
+              {summary?.skillsUpdatableCount} 项技能可更新
+            </span>
+          )}
+          <span className="text-[12px] text-[var(--text-muted)] tabular-nums">
+            共 <strong className="text-[var(--text-primary)] font-semibold">{totalExtensions}</strong> 项扩展
+          </span>
+        </div>
+      </div>
+
+      {/* Unified Toolbar Shell (auto-splits into 2 clean rows at <=759px) */}
+      <div className="ext-hub-toolbar tako-card-surface flex min-w-0 items-center justify-between gap-2 border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)] p-2">
         <div
           role="tablist"
           aria-label="通用扩展"

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod client_monitor;
 pub mod config;
 pub mod edgeone;
+pub mod edgeone_sites;
 pub mod extensions;
 pub mod installer;
 pub mod manifest;
@@ -964,6 +965,9 @@ pub fn apply_settings_patch_for_paths(
             .map(str::to_string),
     );
     let edgeone_mcp_changed = prev_edgeone != next_edgeone;
+    if prev_edgeone.1 != next_edgeone.1 {
+        edgeone::invalidate_status_cache(paths);
+    }
     let endpoint_or_profile_changed = prev_base != state.normalized_base_url()
         || prev_agy_key != state.agy_api_key
         || prev_name != state.normalized_gateway_name()
@@ -1235,9 +1239,222 @@ fn sync_legacy_edgeone_mcp_for_tako_clients(paths: &AppPaths) {
 #[tauri::command]
 async fn get_edgeone_status(
     refresh_account: Option<bool>,
+    cache_only: Option<bool>,
 ) -> Result<edgeone::EdgeOneStatus, String> {
     let paths = AppPaths::detect()?;
+    if cache_only.unwrap_or(false) {
+        return tokio::task::spawn_blocking(move || edgeone::get_status_cached_only(&paths))
+            .await
+            .map_err(|e| format!("读取 EdgeOne 缓存状态失败: {e}"));
+    }
     Ok(edgeone::get_status(&paths, refresh_account.unwrap_or(true)).await)
+}
+
+#[tauri::command]
+async fn list_edgeone_sites() -> Result<Vec<edgeone::EdgeOneSiteRecord>, String> {
+    let paths = AppPaths::detect()?;
+    tokio::task::spawn_blocking(move || edgeone_sites::list_sites(&paths))
+        .await
+        .map_err(|e| format!("读取本地站点列表失败: {e}"))
+}
+
+#[tauri::command]
+async fn inspect_edgeone_source(
+    path: String,
+) -> Result<edgeone::EdgeOneSourceInspection, String> {
+    let paths = AppPaths::detect()?;
+    tokio::task::spawn_blocking(move || edgeone_sites::inspect_deploy_source(&paths, &path))
+        .await
+        .map_err(|e| format!("检测待部署目录失败: {e}"))?
+}
+
+#[tauri::command]
+async fn pick_edgeone_source(kind: Option<String>) -> Result<Option<String>, String> {
+    let kind_str = kind.unwrap_or_else(|| "folder".to_string());
+    tokio::task::spawn_blocking(move || edgeone_sites::pick_deploy_source(&kind_str))
+        .await
+        .map_err(|e| format!("打开文件选择器失败: {e}"))?
+}
+
+#[tauri::command]
+async fn create_edgeone_sample_site() -> Result<edgeone::EdgeOneSourceInspection, String> {
+    let paths = AppPaths::detect()?;
+    tokio::task::spawn_blocking(move || edgeone_sites::create_sample_site(&paths))
+        .await
+        .map_err(|e| format!("创建演示站点失败: {e}"))?
+}
+
+#[tauri::command]
+async fn deploy_edgeone_website(
+    app: AppHandle,
+    req: edgeone::EdgeOneDeployRequest,
+    deploy_guard: tauri::State<'_, edgeone::EdgeOneDeployGuard>,
+) -> Result<edgeone::EdgeOneDeployResult, String> {
+    let paths = AppPaths::detect()?;
+    let handle = app.clone();
+    let started = std::time::Instant::now();
+    let mut deploy_req = req;
+    if deploy_req.source.is_none() {
+        deploy_req.source = Some("ui".to_string());
+    }
+    let env_label = deploy_req
+        .environment
+        .clone()
+        .unwrap_or_else(|| "production".to_string());
+    let res = edgeone::deploy_website_with_progress(
+        &paths,
+        deploy_req,
+        Some(deploy_guard.inner()),
+        move |ev| {
+            let _ = handle.emit("edgeone-deploy-progress", &ev);
+        },
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(outcome) => {
+            telemetry::track_event(
+                &paths,
+                "edgeone_deploy",
+                "tako-switch",
+                true,
+                elapsed_ms,
+                serde_json::json!({ "environment": env_label }),
+            );
+            let _ = app.emit("edgeone-sites-changed", ());
+            Ok(outcome)
+        }
+        Err(err) => {
+            telemetry::track_event(
+                &paths,
+                "edgeone_deploy",
+                "tako-switch",
+                false,
+                elapsed_ms,
+                serde_json::json!({ "environment": env_label }),
+            );
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_edgeone_deploy(
+    deploy_guard: tauri::State<'_, edgeone::EdgeOneDeployGuard>,
+) -> Result<bool, String> {
+    Ok(deploy_guard.cancel())
+}
+
+#[tauri::command]
+async fn update_edgeone_site_meta(
+    app: AppHandle,
+    patch: edgeone::EdgeOneSiteMetaPatch,
+) -> Result<Vec<edgeone::EdgeOneSiteRecord>, String> {
+    let paths = AppPaths::detect()?;
+    let sites = tokio::task::spawn_blocking(move || edgeone_sites::update_site_meta(&paths, patch))
+        .await
+        .map_err(|e| format!("更新站点信息失败: {e}"))??;
+    let _ = app.emit("edgeone-sites-changed", ());
+    Ok(sites)
+}
+
+#[tauri::command]
+async fn remove_edgeone_site_record(
+    app: AppHandle,
+    id: String,
+) -> Result<Vec<edgeone::EdgeOneSiteRecord>, String> {
+    let paths = AppPaths::detect()?;
+    let sites = tokio::task::spawn_blocking(move || edgeone_sites::remove_site_record(&paths, &id))
+        .await
+        .map_err(|e| format!("移除站点记录失败: {e}"))??;
+    let _ = app.emit("edgeone-sites-changed", ());
+    Ok(sites)
+}
+
+#[tauri::command]
+async fn check_edgeone_sites_health(
+    urls: Vec<String>,
+) -> Result<Vec<edgeone::EdgeOneSiteHealth>, String> {
+    let paths = AppPaths::detect()?;
+    Ok(edgeone_sites::check_sites_health(&paths, urls).await)
+}
+
+#[tauri::command]
+async fn open_local_path(path: String) -> Result<(), String> {
+    let paths = AppPaths::detect()?;
+    tokio::task::spawn_blocking(move || edgeone_sites::open_local_path(&paths, &path))
+        .await
+        .map_err(|e| format!("打开本地目录失败: {e}"))?
+}
+
+#[tauri::command]
+async fn edgeone_env_list(
+    project_path: String,
+    project_name: Option<String>,
+    environment: Option<String>,
+) -> Result<Vec<edgeone::EdgeOneEnvVar>, String> {
+    let paths = AppPaths::detect()?;
+    edgeone_sites::env_list(
+        &paths,
+        &project_path,
+        project_name.as_deref(),
+        environment.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn edgeone_env_set(
+    project_path: String,
+    project_name: Option<String>,
+    key: String,
+    value: String,
+    environment: Option<String>,
+) -> Result<Vec<edgeone::EdgeOneEnvVar>, String> {
+    let paths = AppPaths::detect()?;
+    edgeone_sites::env_set(
+        &paths,
+        &project_path,
+        project_name.as_deref(),
+        &key,
+        &value,
+        environment.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn edgeone_env_remove(
+    project_path: String,
+    project_name: Option<String>,
+    key: String,
+    environment: Option<String>,
+) -> Result<Vec<edgeone::EdgeOneEnvVar>, String> {
+    let paths = AppPaths::detect()?;
+    edgeone_sites::env_remove(
+        &paths,
+        &project_path,
+        project_name.as_deref(),
+        &key,
+        environment.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn edgeone_env_pull(
+    project_path: String,
+    project_name: Option<String>,
+    environment: Option<String>,
+) -> Result<String, String> {
+    let paths = AppPaths::detect()?;
+    edgeone_sites::env_pull(
+        &paths,
+        &project_path,
+        project_name.as_deref(),
+        environment.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2928,6 +3145,7 @@ pub fn run() {
         .manage(PendingSelfUpdate(Mutex::new(None)))
         .manage(TrayUpdateNotice(std::sync::Mutex::new(None)))
         .manage(edgeone::EdgeOneLoginGuard::new())
+        .manage(edgeone::EdgeOneDeployGuard::new())
         .manage(edgeone::EdgeOneOpLock::default())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -3038,6 +3256,23 @@ pub fn run() {
                 let _ = agy_proxy::ensure_gateway_service(&paths);
             }
             sync_legacy_edgeone_mcp_for_tako_clients(&paths);
+
+            // Silently pre-warm EdgeOne status cache in the background when credentials exist
+            // so navigating to Tako Web Page renders instantaneously (<1ms).
+            {
+                let eo_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(eo_paths) = AppPaths::detect() {
+                        let st = config::read_switch_state(&eo_paths);
+                        let has_creds = edgeone::has_local_edgeone_credentials(&eo_paths)
+                            || st.mcp.normalized_edgeone_api_token().is_some();
+                        if has_creds && edgeone::resolve_edgeone_runtime(&eo_paths).is_some() {
+                            let _ = edgeone::get_status(&eo_paths, true).await;
+                            let _ = eo_handle.emit("edgeone-status-updated", ());
+                        }
+                    }
+                });
+            }
 
             // Refresh Claude 3p and WorkBuddy model catalog caches shortly after startup so
             // upgraded clients automatically pick up updated recommended models (e.g. swe-2-1)
@@ -3195,6 +3430,20 @@ pub fn run() {
             cancel_edgeone_login,
             switch_edgeone_workspace,
             logout_edgeone,
+            list_edgeone_sites,
+            inspect_edgeone_source,
+            pick_edgeone_source,
+            create_edgeone_sample_site,
+            deploy_edgeone_website,
+            cancel_edgeone_deploy,
+            update_edgeone_site_meta,
+            remove_edgeone_site_record,
+            check_edgeone_sites_health,
+            open_local_path,
+            edgeone_env_list,
+            edgeone_env_set,
+            edgeone_env_remove,
+            edgeone_env_pull,
             get_extensions_summary,
             get_mcp_hub_snapshot,
             upsert_mcp_entry,

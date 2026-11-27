@@ -39,6 +39,7 @@ import {
 import { ToggleSwitch } from "../UiPrimitives";
 import {
   EXT_BUTTON,
+  EXT_DANGER_BUTTON,
   EXT_INPUT,
   EXT_PLATFORMS,
   EXT_PRIMARY_BUTTON,
@@ -498,41 +499,50 @@ export function SkillsHubView({
         aria-busy={busy || loading}
         className="flex min-w-0 flex-col gap-3"
       >
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-          <div
-            role="tablist"
-            aria-label="技能视图"
-            className="inline-flex h-[var(--density-ctrl-h)] shrink-0 items-center gap-0.5 rounded-[7px] bg-[var(--bg-pill)] p-0.5"
-          >
-            {(["installed", "discover"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={tab === value}
-                data-testid={`ext-skills-subtab-${value}`}
-                onClick={() => setTab(value)}
-                className={`h-full cursor-pointer whitespace-nowrap rounded-[5px] px-2.5 text-[12px] ${tab === value ? "bg-[var(--bg-card)] font-semibold text-[var(--text-primary)] shadow-[var(--shadow-segment)]" : "text-[var(--text-secondary)]"}`}
-              >
-                {value === "installed"
-                  ? `已安装 (${snapshot?.skills.length ?? 0})`
-                  : "仓库发现"}
-              </button>
-            ))}
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="flex min-w-0 items-center justify-between gap-2 border-b border-[var(--border)]">
+            <div
+              role="tablist"
+              aria-label="技能视图"
+              className="inline-flex shrink-0 items-center gap-4"
+            >
+              {(["installed", "discover"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === value}
+                  data-testid={`ext-skills-subtab-${value}`}
+                  onClick={() => setTab(value)}
+                  className={`relative -mb-px pb-2 pt-0.5 cursor-pointer whitespace-nowrap text-[12.5px] transition border-b-2 ${
+                    tab === value
+                      ? "border-[var(--accent)] font-semibold text-[var(--text-primary)]"
+                      : "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  }`}
+                >
+                  {value === "installed"
+                    ? `已安装 (${snapshot?.skills.length ?? 0})`
+                    : "仓库发现"}
+                </button>
+              ))}
+            </div>
+            {updates > 0 && (
+              <span className="mb-1.5 inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-[11px] font-semibold text-[var(--success)]">
+                <ArrowUp className="h-3 w-3" />
+                <span className="tabular-nums">{updates}</span> 项可更新
+              </span>
+            )}
           </div>
-          {updates > 0 && (
-            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] font-semibold text-[var(--success)]">
-              <ArrowUp className="h-3 w-3" />
-              <span className="tabular-nums">{updates}</span> 项可更新
-            </span>
-          )}
-          <div className="ml-auto flex min-w-[184px] max-w-[314px] flex-1 items-center justify-end gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <ExtSearchInput
               value={search}
               onChange={setSearch}
               placeholder="搜索技能名称或来源..."
               testId="ext-skills-search"
             />
+            <span className="ml-auto shrink-0 text-[11px] text-[var(--text-muted)] tabular-nums">
+              {tab === "installed" ? `${installed.length} 项` : `${available.length} 项可发现`}
+            </span>
             <ExtHelpPopover label="主副本与同步策略">
               <p>
                 主副本保存在 {snapshot?.masterDir || "~/.tako/switch/skills"}
@@ -596,7 +606,7 @@ export function SkillsHubView({
           </div>
         ) : tab === "installed" ? (
           <>
-            <div className="min-w-0 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card)]">
+            <div className="tako-card-surface min-w-0 overflow-hidden border border-[var(--border)] bg-[var(--bg-card)] shadow-[var(--shadow-card)]">
               <ExtMatrixHeader
                 columns={MATRIX_COLUMNS}
                 leadingLabel="技能名称 / 来源"
@@ -606,7 +616,7 @@ export function SkillsHubView({
                 <div
                   key={item.skill.id}
                   data-testid={`ext-skill-row-${item.skill.id}`}
-                  className="grid min-w-0 items-center border-b border-[var(--border)] px-2 py-[var(--density-row-py)]"
+                  className="grid min-w-0 items-center border-b border-[var(--border)] last:border-b-0 px-2 py-[var(--density-row-py)] hover:bg-[var(--bg-subtle)]/35 transition-colors"
                   style={{ gridTemplateColumns: MATRIX_COLUMNS }}
                 >
                   <div className="min-w-0 pr-2">
@@ -664,7 +674,13 @@ export function SkillsHubView({
                           }
                         />
                         <span
-                          className={`h-3 whitespace-nowrap text-[9px] leading-3 ${status.hasDiff ? "text-[var(--warning)]" : "text-[var(--text-muted)]"}`}
+                          className={`whitespace-nowrap text-[10.5px] leading-tight ${
+                            status.hasDiff
+                              ? "font-medium text-[var(--warning)]"
+                              : status.actualMethod
+                                ? "text-[var(--text-secondary)]"
+                                : "text-[var(--text-muted)]"
+                          }`}
                         >
                           {status.hasDiff
                             ? "有差异"
@@ -795,7 +811,7 @@ export function SkillsHubView({
                 }
               />
             </div>
-            <div className="grid min-w-0 grid-cols-2 gap-3">
+            <div className="grid min-w-0 grid-cols-1 min-[640px]:grid-cols-2 gap-[var(--density-list-gap)]">
               {available.map((skill) => {
                 const installedItem = snapshot?.skills.find(
                   (item) =>
@@ -807,7 +823,7 @@ export function SkillsHubView({
                 return (
                   <article
                     key={`${skill.repoOwner}/${skill.repoName}/${skill.repoSubdir}`}
-                    className="flex min-w-0 flex-col gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--bg-card)] p-3"
+                    className="tako-card-surface flex min-w-0 flex-col gap-2 border border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--border-strong)] shadow-[var(--shadow-card)] p-3 transition-colors"
                   >
                     <div className="flex min-w-0 items-center gap-2">
                       <FolderSearch className="h-4 w-4 shrink-0 text-[var(--success)]" />
@@ -1103,7 +1119,7 @@ export function SkillsHubView({
                     setUninstalling(null);
                   }, true)
                 }
-                className={`${EXT_BUTTON} !border-[var(--danger)] !bg-[var(--danger-soft)] !text-[var(--danger)]`}
+                className={EXT_DANGER_BUTTON}
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 彻底卸载

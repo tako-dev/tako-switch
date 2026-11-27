@@ -4,12 +4,13 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
@@ -60,6 +61,10 @@ pub struct EdgeOneStatus {
     pub workspace_status: Option<String>,
     pub workspaces: Vec<EdgeOneWorkspace>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub cached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
 }
 
 impl EdgeOneStatus {
@@ -90,6 +95,8 @@ impl EdgeOneStatus {
             workspace_status: None,
             workspaces: Vec::new(),
             error: None,
+            cached: false,
+            checked_at: None,
         }
     }
 }
@@ -106,11 +113,25 @@ pub struct EdgeOneProgressEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EdgeOneDeployProgressEvent {
+    pub stage: String,
+    pub percent: u8,
+    pub message: String,
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_line: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EdgeOneDeployRequest {
     pub path: String,
     pub project_name: Option<String>,
     pub environment: Option<String>,
     pub area: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +144,107 @@ pub struct EdgeOneDeployResult {
     pub console_url: Option<String>,
     pub environment: String,
     pub area: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOneSiteDeployment {
+    pub id: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    pub environment: String,
+    pub area: String,
+    pub source: String,
+    pub deployed_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOneSiteRecord {
+    pub id: String,
+    pub project_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_url: Option<String>,
+    pub environment: String,
+    pub area: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_source_path: Option<String>,
+    #[serde(default)]
+    pub local_source_exists: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub deployed_at: u64,
+    #[serde(default = "default_deploy_count")]
+    pub deploy_count: u32,
+    #[serde(default)]
+    pub history: Vec<EdgeOneSiteDeployment>,
+}
+
+fn default_deploy_count() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOneSourceInspection {
+    pub path: String,
+    pub exists: bool,
+    pub kind: String,
+    pub name: String,
+    pub file_count: u32,
+    pub total_bytes: u64,
+    pub has_index_html: bool,
+    pub has_package_json: bool,
+    pub linked_project_name: Option<String>,
+    pub suggested_project_name: String,
+    pub valid: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOneSiteHealth {
+    pub url: String,
+    pub reachable: bool,
+    pub status_code: Option<u16>,
+    pub latency_ms: u64,
+    pub checked_at: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOneEnvVar {
+    pub key: String,
+    pub value: String,
+    pub environment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOneSiteMetaPatch {
+    pub id: String,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub local_source_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,11 +299,198 @@ impl EdgeOneLoginGuard {
     }
 }
 
+#[derive(Default)]
+pub struct EdgeOneDeployGuard {
+    cancel_tx: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl EdgeOneDeployGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn replace(&self, tx: oneshot::Sender<()>) {
+        if let Ok(mut guard) = self.cancel_tx.lock() {
+            if let Some(prev) = guard.replace(tx) {
+                let _ = prev.send(());
+            }
+        }
+    }
+
+    pub fn cancel(&self) -> bool {
+        if let Ok(mut guard) = self.cancel_tx.lock() {
+            if let Some(prev) = guard.take() {
+                let _ = prev.send(());
+                return true;
+            }
+        }
+        false
+    }
+
+    fn clear(&self) {
+        if let Ok(mut guard) = self.cancel_tx.lock() {
+            *guard = None;
+        }
+    }
+}
+
 pub struct EdgeOneOpLock(pub Mutex<()>);
 
 impl Default for EdgeOneOpLock {
     fn default() -> Self {
         Self(Mutex::new(()))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedNodeRuntime {
+    root_dir: PathBuf,
+    node_mtime_ms: u64,
+    resolved: ResolvedNode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedStatusDisk {
+    fingerprint: String,
+    checked_at: u64,
+    status: EdgeOneStatus,
+}
+
+static NODE_RUNTIME_CACHE: OnceLock<std::sync::Mutex<Option<CachedNodeRuntime>>> = OnceLock::new();
+static STATUS_MEM_CACHE: OnceLock<std::sync::Mutex<HashMap<PathBuf, CachedStatusDisk>>> =
+    OnceLock::new();
+static STATUS_REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn file_mtime_ms(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn invalidate_runtime_cache() {
+    if let Some(lock) = NODE_RUNTIME_CACHE.get() {
+        if let Ok(mut guard) = lock.lock() {
+            *guard = None;
+        }
+    }
+}
+
+pub fn invalidate_status_cache(paths: &AppPaths) {
+    let root = edgeone_root_dir(paths);
+    if let Some(lock) = STATUS_MEM_CACHE.get() {
+        if let Ok(mut guard) = lock.lock() {
+            guard.remove(&root);
+        }
+    }
+    let _ = fs::remove_file(status_cache_path(paths));
+}
+
+pub fn status_cache_path(paths: &AppPaths) -> PathBuf {
+    edgeone_root_dir(paths).join("status-cache.json")
+}
+
+pub fn sites_ledger_path(paths: &AppPaths) -> PathBuf {
+    edgeone_root_dir(paths).join("sites-ledger.json")
+}
+
+fn credential_fingerprint(
+    paths: &AppPaths,
+    node_version: Option<&str>,
+    cli_version: Option<&str>,
+    token: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(node_version.unwrap_or_default().as_bytes());
+    hasher.update(b"|");
+    hasher.update(cli_version.unwrap_or_default().as_bytes());
+    hasher.update(b"|");
+    if let Some(tok) = token {
+        hasher.update(tok.as_bytes());
+    }
+    hasher.update(b"|");
+    let eo_dir = paths.home.join(".edgeone");
+    if let Ok(entries) = fs::read_dir(&eo_dir) {
+        let mut items: Vec<(String, u64, u64)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                let name = e.file_name().to_string_lossy().to_string();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                Some((name, meta.len(), mtime))
+            })
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, len, mtime) in items {
+            hasher.update(name.as_bytes());
+            hasher.update(len.to_le_bytes());
+            hasher.update(mtime.to_le_bytes());
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn load_cached_status(paths: &AppPaths, expected_fp: &str) -> Option<CachedStatusDisk> {
+    let root = edgeone_root_dir(paths);
+    let mem = STATUS_MEM_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(guard) = mem.lock() {
+        if let Some(entry) = guard.get(&root) {
+            if entry.fingerprint == expected_fp {
+                return Some(entry.clone());
+            }
+        }
+    }
+    let disk_path = status_cache_path(paths);
+    let raw = fs::read_to_string(&disk_path).ok()?;
+    let disk: CachedStatusDisk = serde_json::from_str(&raw).ok()?;
+    if disk.fingerprint != expected_fp {
+        return None;
+    }
+    if let Ok(mut guard) = mem.lock() {
+        guard.insert(root, disk.clone());
+    }
+    Some(disk)
+}
+
+fn save_cached_status(paths: &AppPaths, fingerprint: String, status: &EdgeOneStatus) {
+    let root = edgeone_root_dir(paths);
+    let checked_at = status.checked_at.unwrap_or_else(now_epoch_ms);
+    let mut stored = status.clone();
+    stored.checked_at = Some(checked_at);
+    stored.cached = false;
+    let entry = CachedStatusDisk {
+        fingerprint,
+        checked_at,
+        status: stored,
+    };
+    let mem = STATUS_MEM_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = mem.lock() {
+        guard.insert(root, entry.clone());
+    }
+    let disk_path = status_cache_path(paths);
+    if let Some(parent) = disk_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(&entry) {
+        let tmp = disk_path.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &disk_path);
+        }
     }
 }
 
@@ -335,28 +644,58 @@ pub fn resolve_managed_node(paths: &AppPaths) -> Option<ResolvedNode> {
 }
 
 pub fn resolve_node_runtime(paths: &AppPaths) -> Option<ResolvedNode> {
-    if let Some(managed) = resolve_managed_node(paths) {
-        return Some(managed);
-    }
-    let sys = detect_node_runtime();
-    if sys.available && sys.meets_min_version {
-        if let (Some(node_str), Some(version), Some(major)) =
-            (sys.node_path, sys.version, sys.major)
-        {
-            let node_exe = PathBuf::from(node_str);
-            if node_exe.is_file() {
-                return Some(ResolvedNode {
-                    npm_cli_js: find_npm_cli_js_near_node(&node_exe),
-                    npm_exe: find_npm_exe_near_node(&node_exe),
-                    node_exe,
-                    version,
-                    major,
-                    managed: false,
-                });
+    let root_dir = edgeone_root_dir(paths);
+    let cache = NODE_RUNTIME_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.root_dir == root_dir
+                && entry.resolved.node_exe.is_file()
+                && file_mtime_ms(&entry.resolved.node_exe) == entry.node_mtime_ms
+            {
+                return Some(entry.resolved.clone());
             }
         }
     }
-    None
+
+    let resolved = if let Some(managed) = resolve_managed_node(paths) {
+        Some(managed)
+    } else {
+        let sys = detect_node_runtime();
+        if sys.available && sys.meets_min_version {
+            if let (Some(node_str), Some(version), Some(major)) =
+                (sys.node_path, sys.version, sys.major)
+            {
+                let node_exe = PathBuf::from(node_str);
+                if node_exe.is_file() {
+                    Some(ResolvedNode {
+                        npm_cli_js: find_npm_cli_js_near_node(&node_exe),
+                        npm_exe: find_npm_exe_near_node(&node_exe),
+                        node_exe,
+                        version,
+                        major,
+                        managed: false,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(ref node) = resolved {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some(CachedNodeRuntime {
+                root_dir,
+                node_mtime_ms: file_mtime_ms(&node.node_exe),
+                resolved: node.clone(),
+            });
+        }
+    }
+    resolved
 }
 
 pub fn read_managed_cli_version(paths: &AppPaths) -> Option<String> {
@@ -645,6 +984,7 @@ where
     let _ = fs::remove_file(&archive_path);
     let _ = fs::remove_dir_all(&extract_root);
 
+    invalidate_runtime_cache();
     resolve_managed_node(paths)
         .ok_or_else(|| "内置 Node.js 解压完成但无法启动，请检查权限后重试".to_string())
 }
@@ -785,6 +1125,8 @@ where
         )
     })?;
 
+    invalidate_runtime_cache();
+    invalidate_status_cache(paths);
     emit(EdgeOneProgressEvent {
         stage: "cli".to_string(),
         percent: 88,
@@ -995,6 +1337,19 @@ async fn run_edgeone_cli(
     }
 }
 
+pub(crate) async fn run_edgeone_cli_pub(
+    paths: &AppPaths,
+    runtime: &ResolvedEdgeOneRuntime,
+    args: &[String],
+    cwd: Option<&Path>,
+    timeout_secs: u64,
+    max_retries: usize,
+    extra_env: &HashMap<String, String>,
+) -> Result<(bool, String, String), String> {
+    let out = run_edgeone_cli(paths, runtime, args, cwd, timeout_secs, max_retries, extra_env).await?;
+    Ok((out.success, out.stdout, out.stderr))
+}
+
 fn format_workspace_plan(raw: &str) -> String {
     let trimmed = raw.trim();
     let stripped = trimmed
@@ -1060,6 +1415,49 @@ fn parse_workspaces_json(val: &Value) -> Vec<EdgeOneWorkspace> {
         .unwrap_or_default()
 }
 
+pub fn get_status_cached_only(paths: &AppPaths) -> EdgeOneStatus {
+    let node = resolve_node_runtime(paths);
+    let cli_version = read_managed_cli_version(paths);
+    let cli_entry = managed_cli_entry(paths);
+    let cli_installed = cli_version.is_some();
+
+    let mut status = EdgeOneStatus::base(
+        node.is_some(),
+        node.as_ref().map(|n| n.version.clone()),
+        node.as_ref().map(|n| n.managed).unwrap_or(false),
+        cli_installed,
+        cli_version.clone(),
+        cli_installed.then(|| cli_entry.to_string_lossy().to_string()),
+    );
+
+    let state = read_switch_state(paths);
+    let token_opt = state.mcp.normalized_edgeone_api_token().map(str::to_string);
+    let has_token = token_opt.is_some();
+    let has_local = has_local_edgeone_credentials(paths);
+    status.has_local_credentials = has_local || has_token;
+
+    if !status.ready {
+        if has_token {
+            status.auth_mode = "api_token".to_string();
+        }
+        return status;
+    }
+
+    let fp = credential_fingerprint(
+        paths,
+        status.node_version.as_deref(),
+        status.cli_version.as_deref(),
+        token_opt.as_deref(),
+    );
+    if let Some(hit) = load_cached_status(paths, &fp) {
+        let mut cached = hit.status;
+        cached.cached = true;
+        cached.checked_at = Some(hit.checked_at);
+        return cached;
+    }
+    status
+}
+
 pub async fn get_status(paths: &AppPaths, refresh_account: bool) -> EdgeOneStatus {
     let node = resolve_node_runtime(paths);
     let cli_version = read_managed_cli_version(paths);
@@ -1076,7 +1474,8 @@ pub async fn get_status(paths: &AppPaths, refresh_account: bool) -> EdgeOneStatu
     );
 
     let state = read_switch_state(paths);
-    let has_token = state.mcp.normalized_edgeone_api_token().is_some();
+    let token_opt = state.mcp.normalized_edgeone_api_token().map(str::to_string);
+    let has_token = token_opt.is_some();
     let has_local = has_local_edgeone_credentials(paths);
     status.has_local_credentials = has_local || has_token;
 
@@ -1091,6 +1490,37 @@ pub async fn get_status(paths: &AppPaths, refresh_account: bool) -> EdgeOneStatu
         return status;
     }
 
+    let fp = credential_fingerprint(
+        paths,
+        status.node_version.as_deref(),
+        status.cli_version.as_deref(),
+        token_opt.as_deref(),
+    );
+
+    // Sub-millisecond fast path when cache matches current credential fingerprint
+    if !refresh_account {
+        if let Some(hit) = load_cached_status(paths, &fp) {
+            let mut cached = hit.status;
+            cached.cached = true;
+            cached.checked_at = Some(hit.checked_at);
+            return cached;
+        }
+    }
+
+    // Single-flight deduplication so concurrent UI panels don't spawn duplicate CLI processes
+    let refresh_lock = STATUS_REFRESH_LOCK.get_or_init(|| Mutex::new(()));
+    let _flight_guard = refresh_lock.lock().await;
+
+    if let Some(hit) = load_cached_status(paths, &fp) {
+        let age_ms = now_epoch_ms().saturating_sub(hit.checked_at);
+        if !refresh_account || age_ms < 1_500 {
+            let mut cached = hit.status;
+            cached.cached = !refresh_account;
+            cached.checked_at = Some(hit.checked_at);
+            return cached;
+        }
+    }
+
     let runtime = ResolvedEdgeOneRuntime {
         node: node.unwrap(),
         cli_entry,
@@ -1099,17 +1529,51 @@ pub async fn get_status(paths: &AppPaths, refresh_account: bool) -> EdgeOneStatu
 
     let whoami_args = vec!["whoami".to_string(), "--json".to_string()];
     let empty_env = HashMap::new();
-    match run_edgeone_cli(
-        paths,
-        &runtime,
-        &whoami_args,
-        None,
-        CLI_QUICK_TIMEOUT_SECS,
-        2,
-        &empty_env,
-    )
-    .await
-    {
+
+    // Run `whoami --json` and `workspace ls --json` IN PARALLEL to cut cold latency nearly in half!
+    let (whoami_res, ws_res_opt) = if has_local && !has_token {
+        let ws_args = vec![
+            "workspace".to_string(),
+            "ls".to_string(),
+            "--json".to_string(),
+        ];
+        let (w, ws) = tokio::join!(
+            run_edgeone_cli(
+                paths,
+                &runtime,
+                &whoami_args,
+                None,
+                CLI_QUICK_TIMEOUT_SECS,
+                2,
+                &empty_env,
+            ),
+            run_edgeone_cli(
+                paths,
+                &runtime,
+                &ws_args,
+                None,
+                CLI_QUICK_TIMEOUT_SECS,
+                1,
+                &empty_env,
+            )
+        );
+        (w, Some(ws))
+    } else {
+        let w = run_edgeone_cli(
+            paths,
+            &runtime,
+            &whoami_args,
+            None,
+            CLI_QUICK_TIMEOUT_SECS,
+            2,
+            &empty_env,
+        )
+        .await;
+        (w, None)
+    };
+
+    let mut transient_err = false;
+    match whoami_res {
         Ok(out) => {
             if let Some(json) = extract_last_json_object(&out.stdout) {
                 let authed = json
@@ -1175,38 +1639,53 @@ pub async fn get_status(paths: &AppPaths, refresh_account: bool) -> EdgeOneStatu
                     status.authenticated = false;
                     status.auth_mode = "none".to_string();
                 } else {
+                    transient_err = is_transient_network_error(&combined);
                     status.error = Some(friendly_edgeone_error(&combined));
                 }
             }
         }
         Err(err) => {
+            transient_err = true;
             status.error = Some(err);
         }
     }
 
     if status.authenticated && status.auth_mode == "login" {
-        let ws_args = vec![
-            "workspace".to_string(),
-            "ls".to_string(),
-            "--json".to_string(),
-        ];
-        if let Ok(ws_out) = run_edgeone_cli(
-            paths,
-            &runtime,
-            &ws_args,
-            None,
-            CLI_QUICK_TIMEOUT_SECS,
-            2,
-            &empty_env,
-        )
-        .await
-        {
+        if let Some(Ok(ws_out)) = ws_res_opt {
             if let Some(val) = extract_last_json_object(&ws_out.stdout) {
                 status.workspaces = parse_workspaces_json(&val);
             }
         }
+        // Fallback if parallel call didn't run or returned empty due to transient hiccup
+        if status.workspaces.is_empty() {
+            let ws_args = vec![
+                "workspace".to_string(),
+                "ls".to_string(),
+                "--json".to_string(),
+            ];
+            if let Ok(ws_out) = run_edgeone_cli(
+                paths,
+                &runtime,
+                &ws_args,
+                None,
+                CLI_QUICK_TIMEOUT_SECS,
+                1,
+                &empty_env,
+            )
+            .await
+            {
+                if let Some(val) = extract_last_json_object(&ws_out.stdout) {
+                    status.workspaces = parse_workspaces_json(&val);
+                }
+            }
+        }
     }
 
+    status.checked_at = Some(now_epoch_ms());
+    status.cached = false;
+    if !transient_err {
+        save_cached_status(paths, fp, &status);
+    }
     status
 }
 
@@ -1378,6 +1857,7 @@ where
         login_url: None,
     });
 
+    invalidate_status_cache(paths);
     let status = get_status(paths, true).await;
     if !status.authenticated {
         return Err(status
@@ -1411,6 +1891,7 @@ pub async fn switch_workspace(paths: &AppPaths, workspace: &str) -> Result<EdgeO
     if !out.success {
         return Err(friendly_edgeone_error(&out.combined()));
     }
+    invalidate_status_cache(paths);
     Ok(get_status(paths, true).await)
 }
 
@@ -1428,6 +1909,7 @@ pub async fn logout(paths: &AppPaths) -> Result<EdgeOneStatus, String> {
         )
         .await;
     }
+    invalidate_status_cache(paths);
     Ok(get_status(paths, false).await)
 }
 
@@ -1447,11 +1929,11 @@ fn is_auth_failure_text(text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn friendly_edgeone_error(raw: &str) -> String {
+pub(crate) fn friendly_edgeone_error(raw: &str) -> String {
     let clean = strip_ansi(raw);
     let lower = clean.to_ascii_lowercase();
     if is_auth_failure_text(&clean) {
-        return "尚未登录腾讯云 EdgeOne 或登录态已失效。请打开 Tako Switch →「MCP 能力」→「网站上线」，点击「一键登录腾讯云 EdgeOne」完成浏览器授权后重试。".to_string();
+        return "尚未登录腾讯云 EdgeOne 或登录态已失效。请打开 Tako Switch →「网站托管 · Tako Web Page」，点击「浏览器一键登录」完成授权后重试。".to_string();
     }
     if lower.contains("no usable workspace") || lower.contains("cannot be used") || lower.contains("zoneunusableerror") {
         return "当前腾讯云账号下暂无可用的 EdgeOne Makers 工作空间（或空间处于停用/欠费状态），请先在腾讯云 EdgeOne 控制台确认或创建一个免费工作空间后再试。".to_string();
@@ -1505,7 +1987,7 @@ fn short_suffix() -> String {
     format!("{:x}", secs & 0xfffff)
 }
 
-fn read_linked_project_name(dir: &Path) -> Option<String> {
+pub(crate) fn read_linked_project_name(dir: &Path) -> Option<String> {
     let p = dir.join(".edgeone").join("project.json");
     let raw = fs::read_to_string(&p).ok()?;
     let val: Value = serde_json::from_str(&raw).ok()?;
@@ -1649,7 +2131,7 @@ pub fn prepare_deploy_target(
     Err(format!("无效的部署目标: {}", raw_path.display()))
 }
 
-fn expand_user_path(paths: &AppPaths, raw: &str) -> PathBuf {
+pub(crate) fn expand_user_path(paths: &AppPaths, raw: &str) -> PathBuf {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("~/") {
         paths.home.join(rest)
@@ -1660,25 +2142,198 @@ fn expand_user_path(paths: &AppPaths, raw: &str) -> PathBuf {
     }
 }
 
-pub async fn deploy_website(
+fn classify_deploy_progress(line: &str, current_pct: u8) -> (u8, &'static str, &'static str) {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("online") || lower.contains("active") || lower.contains("ready") || lower.contains("effective") || lower.contains("url") {
+        return (current_pct.max(92), "publishing", "正在等待 EdgeOne 边缘节点生效...");
+    }
+    if lower.contains("deploy") || lower.contains("creat") || lower.contains("build") {
+        return (current_pct.max(76), "deploying", "正在创建 EdgeOne 边缘部署...");
+    }
+    if lower.contains("upload") || lower.contains("cos") || lower.contains("push") || lower.contains("send") {
+        return (current_pct.max(54), "uploading", "正在上传静态资源至腾讯云 EdgeOne...");
+    }
+    if lower.contains("zip") || lower.contains("pack") || lower.contains("prepar") || lower.contains("scan") {
+        return (current_pct.max(36), "preparing", "正在整理与打包待发布文件...");
+    }
+    (current_pct.min(88).saturating_add(2), "uploading", "正在与腾讯云 EdgeOne 同步部署...")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_deploy_cli_streaming<F>(
+    paths: &AppPaths,
+    runtime: &ResolvedEdgeOneRuntime,
+    args: &[String],
+    cwd: Option<&Path>,
+    project_name: &str,
+    started: Instant,
+    deploy_guard: Option<&EdgeOneDeployGuard>,
+    emit: Arc<F>,
+) -> Result<CliOutput, String>
+where
+    F: Fn(EdgeOneDeployProgressEvent) + Send + Sync + 'static,
+{
+    let state = read_switch_state(paths);
+    let mut cmd = Command::new(&runtime.node.node_exe);
+    cmd.arg(&runtime.cli_entry)
+        .args(args)
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .env("FORCE_NON_TTY", "1")
+        .env("EDGEONE_NON_INTERACTIVE", "1")
+        .env("PAGES_SOURCE", "mcp")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    if let Some(path_val) = prepend_path_env(runtime.node.node_exe.parent()) {
+        cmd.env("PATH", path_val);
+    }
+    if let Some(token) = state.mcp.normalized_edgeone_api_token() {
+        cmd.env("EDGEONE_PAGES_API_TOKEN", token);
+    }
+    apply_no_window_tokio(&mut cmd);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 EdgeOne 部署进程失败: {e}"))?;
+
+    let cancel_rx = if let Some(guard) = deploy_guard {
+        let (tx, rx) = oneshot::channel::<()>();
+        guard.replace(tx);
+        Some(rx)
+    } else {
+        None
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let pct_state = Arc::new(std::sync::atomic::AtomicU8::new(34));
+
+    let emit_out = Arc::clone(&emit);
+    let pct_out = Arc::clone(&pct_state);
+    let proj_out = project_name.to_string();
+    let stdout_task = tokio::spawn(async move {
+        let mut collected = String::new();
+        if let Some(out) = stdout {
+            let mut reader = BufReader::new(out).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let clean = strip_ansi(&line);
+                collected.push_str(&clean);
+                collected.push('\n');
+                let trimmed = clean.trim();
+                if trimmed.is_empty() || (trimmed.starts_with('{') && trimmed.ends_with('}')) {
+                    continue;
+                }
+                let prev = pct_out.load(std::sync::atomic::Ordering::Relaxed);
+                let (next_pct, stage, msg) = classify_deploy_progress(trimmed, prev);
+                pct_out.store(next_pct, std::sync::atomic::Ordering::Relaxed);
+                emit_out(EdgeOneDeployProgressEvent {
+                    stage: stage.to_string(),
+                    percent: next_pct,
+                    message: msg.to_string(),
+                    project_name: Some(proj_out.clone()),
+                    log_line: Some(trimmed.chars().take(240).collect()),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+        collected
+    });
+
+    let emit_err = Arc::clone(&emit);
+    let pct_err = Arc::clone(&pct_state);
+    let proj_err = project_name.to_string();
+    let stderr_task = tokio::spawn(async move {
+        let mut collected = String::new();
+        if let Some(err) = stderr {
+            let mut reader = BufReader::new(err).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let clean = strip_ansi(&line);
+                collected.push_str(&clean);
+                collected.push('\n');
+                let trimmed = clean.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let prev = pct_err.load(std::sync::atomic::Ordering::Relaxed);
+                emit_err(EdgeOneDeployProgressEvent {
+                    stage: "uploading".to_string(),
+                    percent: prev,
+                    message: "正在处理部署输出...".to_string(),
+                    project_name: Some(proj_err.clone()),
+                    log_line: Some(trimmed.chars().take(240).collect()),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+        collected
+    });
+
+    let wait_res = if let Some(mut rx) = cancel_rx {
+        tokio::select! {
+            _ = &mut rx => {
+                let _ = child.kill().await;
+                if let Some(guard) = deploy_guard {
+                    guard.clear();
+                }
+                return Err("已取消本次网站部署".to_string());
+            }
+            res = tokio::time::timeout(Duration::from_secs(CLI_DEPLOY_TIMEOUT_SECS), child.wait()) => res
+        }
+    } else {
+        tokio::time::timeout(Duration::from_secs(CLI_DEPLOY_TIMEOUT_SECS), child.wait()).await
+    };
+
+    if let Some(guard) = deploy_guard {
+        guard.clear();
+    }
+
+    let exit_status = match wait_res {
+        Ok(Ok(st)) => st,
+        Ok(Err(e)) => return Err(format!("等待 EdgeOne 部署结束失败: {e}")),
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(format!("调用腾讯云 EdgeOne 超时（超过 {CLI_DEPLOY_TIMEOUT_SECS} 秒）"));
+        }
+    };
+
+    let stdout_text = stdout_task.await.unwrap_or_default();
+    let stderr_text = stderr_task.await.unwrap_or_default();
+
+    Ok(CliOutput {
+        success: exit_status.success(),
+        exit_code: exit_status.code(),
+        stdout: stdout_text,
+        stderr: stderr_text,
+    })
+}
+
+pub async fn deploy_website_with_progress<F>(
     paths: &AppPaths,
     req: EdgeOneDeployRequest,
-) -> Result<EdgeOneDeployResult, String> {
+    deploy_guard: Option<&EdgeOneDeployGuard>,
+    emit: F,
+) -> Result<EdgeOneDeployResult, String>
+where
+    F: Fn(EdgeOneDeployProgressEvent) + Send + Sync + 'static,
+{
+    let started = Instant::now();
+    let emit = Arc::new(emit);
     let raw_trimmed = req.path.trim();
     if raw_trimmed.is_empty() {
         return Err("缺少必需参数 path（请提供网站文件夹路径、单个 .html 文件路径或 .zip 压缩包路径）".to_string());
     }
 
     let source_path = expand_user_path(paths, raw_trimmed);
-    let (deploy_target, _temp_guard) = prepare_deploy_target(&source_path)?;
-
     let state = read_switch_state(paths);
     let has_token = state.mcp.normalized_edgeone_api_token().is_some();
     if !has_token && !has_local_edgeone_credentials(paths) {
-        return Err("尚未登录腾讯云 EdgeOne。请打开 Tako Switch → 左侧「MCP 能力」→「网站上线」，点击「一键登录腾讯云 EdgeOne」完成浏览器授权后重试。".to_string());
+        return Err("尚未登录腾讯云 EdgeOne。请打开 Tako Switch →「网站托管 · Tako Web Page」，点击「浏览器一键登录」完成授权后重试。".to_string());
     }
-
-    let runtime = ensure_edgeone_cli(paths, false, &|_| {}).await?;
 
     let project_name = resolve_project_name(
         &source_path,
@@ -1705,6 +2360,41 @@ pub async fn deploy_website(
         Some("overseas") => "overseas",
         _ => "global",
     };
+    let source_label = req
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ui")
+        .to_string();
+
+    emit(EdgeOneDeployProgressEvent {
+        stage: "preparing".to_string(),
+        percent: 12,
+        message: "正在校验本地站点文件并准备部署包...".to_string(),
+        project_name: Some(project_name.clone()),
+        log_line: Some(format!("来源路径: {}", source_path.display())),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    });
+
+    let src_clone = source_path.clone();
+    let (deploy_target, _temp_guard) =
+        tokio::task::spawn_blocking(move || prepare_deploy_target(&src_clone))
+            .await
+            .map_err(|e| format!("准备部署文件任务中断: {e}"))??;
+
+    let runtime = ensure_edgeone_cli(paths, false, &|_| {}).await?;
+
+    emit(EdgeOneDeployProgressEvent {
+        stage: "uploading".to_string(),
+        percent: 28,
+        message: format!("正在上传并部署 {project_name} 至腾讯云 EdgeOne..."),
+        project_name: Some(project_name.clone()),
+        log_line: Some(format!(
+            "edgeone makers deploy -n {project_name} -e {environment} -a {area}"
+        )),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    });
 
     let args = vec![
         "makers".to_string(),
@@ -1726,14 +2416,15 @@ pub async fn deploy_website(
         deploy_target.parent()
     };
 
-    let mut out = run_edgeone_cli(
+    let mut out = run_deploy_cli_streaming(
         paths,
         &runtime,
         &args,
         work_dir,
-        CLI_DEPLOY_TIMEOUT_SECS,
-        0,
-        &HashMap::new(),
+        &project_name,
+        started,
+        deploy_guard,
+        Arc::clone(&emit),
     )
     .await?;
 
@@ -1746,15 +2437,24 @@ pub async fn deploy_website(
                 || combined.contains("DescribeZones")
                 || combined.contains("DescribePagesProjects"))
         {
+            emit(EdgeOneDeployProgressEvent {
+                stage: "uploading".to_string(),
+                percent: 32,
+                message: "预检连接波动，正在自动重试...".to_string(),
+                project_name: Some(project_name.clone()),
+                log_line: Some("检测到瞬时网络重置，自动重试预检".to_string()),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
             tokio::time::sleep(Duration::from_millis(700)).await;
-            out = run_edgeone_cli(
+            out = run_deploy_cli_streaming(
                 paths,
                 &runtime,
                 &args,
                 work_dir,
-                CLI_DEPLOY_TIMEOUT_SECS,
-                0,
-                &HashMap::new(),
+                &project_name,
+                started,
+                deploy_guard,
+                Arc::clone(&emit),
             )
             .await?;
         }
@@ -1773,9 +2473,10 @@ pub async fn deploy_website(
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "部署已完成但未返回公网访问地址".to_string())?
                 .to_string();
-            return Ok(EdgeOneDeployResult {
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let result = EdgeOneDeployResult {
                 url,
-                project_name,
+                project_name: project_name.clone(),
                 project_id: json
                     .get("projectId")
                     .and_then(Value::as_str)
@@ -1790,7 +2491,29 @@ pub async fn deploy_website(
                     .map(str::to_string),
                 environment: environment.to_string(),
                 area: area.to_string(),
+                duration_ms: Some(elapsed_ms),
+            };
+
+            let cached_status = get_status_cached_only(paths);
+            let _ = crate::edgeone_sites::record_site_deployment(
+                paths,
+                &result,
+                Some(&source_path),
+                &source_label,
+                cached_status.workspace_id,
+                cached_status.workspace_name,
+                Some(elapsed_ms),
+            );
+
+            emit(EdgeOneDeployProgressEvent {
+                stage: "done".to_string(),
+                percent: 100,
+                message: format!("站点 {project_name} 已成功上线！"),
+                project_name: Some(project_name),
+                log_line: Some(format!("公网地址: {}", result.url)),
+                elapsed_ms,
             });
+            return Ok(result);
         }
         if let Some(err_msg) = json
             .get("error")
@@ -1810,6 +2533,13 @@ pub async fn deploy_website(
         out.exit_code,
         out.combined().chars().take(300).collect::<String>()
     ))
+}
+
+pub async fn deploy_website(
+    paths: &AppPaths,
+    req: EdgeOneDeployRequest,
+) -> Result<EdgeOneDeployResult, String> {
+    deploy_website_with_progress(paths, req, None, |_| {}).await
 }
 
 #[cfg(test)]
@@ -1946,7 +2676,7 @@ mod tests {
         assert!(!is_transient_network_error("Invalid project name"));
 
         assert!(friendly_edgeone_error("You are not authenticated. Please run `edgeone login`.")
-            .contains("一键登录腾讯云 EdgeOne"));
+            .contains("浏览器一键登录"));
         assert!(friendly_edgeone_error("read ECONNRESET").contains("网络波动"));
     }
 
@@ -2041,6 +2771,12 @@ process.exit(1);
 
         let site_file = tmp.path().join("demo.html");
         fs::write(&site_file, "<h1>Live</h1>").unwrap();
+        // Fast cached status hit should NOT invoke whoami again
+        let cached_status = get_status(&paths, false).await;
+        assert!(cached_status.cached, "expected cached status hit");
+        assert!(cached_status.authenticated);
+        assert_eq!(fs::read_to_string(&counter_file).unwrap().trim(), "2");
+
         let deployed = deploy_website(
             &paths,
             EdgeOneDeployRequest {
@@ -2048,6 +2784,7 @@ process.exit(1);
                 project_name: Some("My Demo Site".to_string()),
                 environment: None,
                 area: None,
+                source: Some("ui".to_string()),
             },
         )
         .await
@@ -2056,6 +2793,13 @@ process.exit(1);
         assert_eq!(deployed.url, "https://my-demo-site.edgeone.app");
         assert_eq!(deployed.project_id.as_deref(), Some("pages-test1"));
         assert_eq!(deployed.deployment_id.as_deref(), Some("dep-999"));
+
+        // Verify local site ledger recorded deployment automatically
+        let sites = crate::edgeone_sites::list_sites(&paths);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].project_name, "my-demo-site");
+        assert_eq!(sites[0].url, "https://my-demo-site.edgeone.app");
+        assert_eq!(sites[0].workspace_id.as_deref(), Some("zone-abc"));
         let _ = node;
     }
 }
