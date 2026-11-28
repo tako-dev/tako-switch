@@ -1,11 +1,11 @@
 {
   "appId": "antigravity",
-  "capturedAt": "2026-11-25T23:09:12Z",
+  "capturedAt": "2026-11-28T02:47:43Z",
   "profile": {
     "bundleName": "Antigravity.app",
     "bundleId": "com.google.antigravity",
-    "shortVersion": "2.35.2",
-    "bundleVersion": "2.35.2",
+    "shortVersion": "2.36.0",
+    "bundleVersion": "2.36.0",
     "minSystemVersion": "13.0",
     "urlSchemes": [
       "antigravity"
